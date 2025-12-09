@@ -1,0 +1,37 @@
+__pycache__/
+*.pyc
+*.pyo
+*.swp
+.DS_Store
+.idea/
+.vscode/
+.venv/
+env/
+*.log
+
+# Data / weights / outputs (do not commit large artifacts)
+*.mp4
+*.wav
+*.zip
+*.tar
+*.tar.gz
+*.npz
+*.npy
+*.pt
+*.ckpt
+*.onnx
+*.t7
+*.dat
+*.exe
+outputs/
+test*_output/
+test_video_output/
+FakeAV_stage/
+FakeAV_feats/
+datasets/
+models/
+external/
+
+# Notebooks
+*.ipynb
+
