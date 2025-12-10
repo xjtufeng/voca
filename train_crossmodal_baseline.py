@@ -1,20 +1,3 @@
-"""
-Lightweight cross-modal baseline for FakeAV (CPU-friendly).
-Steps (expected workflow):
-1) 将 FakeAV 压缩包解压到某个目录，形成 dataset_root/{real,fake}/*.mp4
-   示例: tar -xzf FakeAV.tar.gz -C /path/to/data
-2) 运行特征提取（可复用 prepare_features_dataset.py），得到:
-   output_root/
-     real/<vid>/visual_embeddings.npz
-     real/<vid>/audio_embeddings.npz
-     fake/<vid>/...
-3) 使用本脚本在 CPU 上训练一个轻量跨模态分类头，目标验证准确率 >=70%。
-
-关键点：
-- 不改动已有 encoder；仅加载已导出的特征。
-- 统一假设 visual/audio npz 内含键 "embeddings"。
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -37,10 +20,7 @@ except Exception:
 
 
 def list_samples(features_root: Path) -> List[Tuple[Path, int]]:
-    """
-    扫描 features_root/{real,fake} 下的子目录，寻找 visual_embeddings.npz + audio_embeddings.npz。
-    返回列表: (样本目录, 标签)；real=1, fake=0。
-    """
+    
     samples: List[Tuple[Path, int]] = []
     for label_name, label in [("real", 1), ("fake", 0)]:
         label_dir = features_root / label_name
@@ -69,10 +49,7 @@ def _align_and_crop(
     seq_len: int,
     train: bool,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    对齐到最短长度，再随机/中心裁剪到 seq_len。
-    若长度不足，重复最后一帧填充。
-    """
+   
     t = min(len(visual), len(audio))
     visual = visual[:t]
     audio = audio[:t]
@@ -125,7 +102,7 @@ class AVFeatDataset(Dataset):
 
 class CrossModalBaseline(nn.Module):
     """
-    轻量投影 + MLP 判别；带逐帧相似度。
+    轻量跨模态基线：对齐序列 -> 线性投影 -> 逐帧 MLP 打分 -> 时间平均。
     """
 
     def __init__(self, dv: int, da: int, hidden: int = 256, dropout: float = 0.1):
@@ -146,15 +123,42 @@ class CrossModalBaseline(nn.Module):
         )
 
     def forward(self, v: torch.Tensor, a: torch.Tensor):
+        # v, a: (B, T, D)
+        v = self.v_proj(v)
+        a = self.a_proj(a)
+        diff = torch.abs(v - a)
+        x = torch.cat([v, a, diff], dim=-1)  # (B, T, 3H)
+        logits_t = self.mlp(x).squeeze(-1)   # (B, T)
+        logits = logits_t.mean(dim=1)        # 段级
+        sim = F.cosine_similarity(v, a, dim=-1, eps=1e-8).mean(dim=1)
+        return logits, sim
+
+
+
+    def __init__(self, dv: int, da: int, hidden: int = 256, dropout: float = 0.1):
+        super().__init__()
+        self.v_proj = nn.Sequential(
+            nn.Linear(dv, hidden),
+            nn.LayerNorm(hidden),
+        )
+        self.a_proj = nn.Sequential(
+            nn.Linear(da, hidden),
+            nn.LayerNorm(hidden),
+        )
+        self.mlp = nn.Sequential(
+            nn.Linear(hidden * 3, hidden),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, 1),
+        )
+
+    def forward(self, v: torch.Tensor, a: torch.Tensor):
         """
-        v: (B, T, Dv), a: (B, T, Da)
-        返回:
-            logits: (B,) 段级 logits
-            sim: (B,) 段级平均余弦相似度
+      
         """
         v = self.v_proj(v)
         a = self.a_proj(a)
-        # 逐帧特征融合
+      
         diff = torch.abs(v - a)
         x = torch.cat([v, a, diff], dim=-1)  # (B,T,3H)
         logits_t = self.mlp(x).squeeze(-1)   # (B,T)
@@ -206,11 +210,10 @@ def train(args):
         raise FileNotFoundError(f"No samples found under {features_root}/(real|fake)")
     print(f"[INFO] Found {len(samples)} samples")
 
-    # 简单划分
+  
     train_set, val_set, test_set = split_dataset(samples, train_ratio=0.6, val_ratio=0.2)
     print(f"[INFO] Split: train={len(train_set)}, val={len(val_set)}, test={len(test_set)}")
 
-    # 预读一个样本确定维度
     v_dim = _load_npz_embeddings(train_set[0][0] / "visual_embeddings.npz").shape[1]
     a_dim = _load_npz_embeddings(train_set[0][0] / "audio_embeddings.npz").shape[1]
     print(f"[INFO] Feature dims: visual={v_dim}, audio={a_dim}")
