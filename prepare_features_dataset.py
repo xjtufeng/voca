@@ -45,12 +45,24 @@ def _slugify_path(path: Path) -> str:
     return "_".join(path.with_suffix("").parts)
 
 
-def find_videos(dataset_root: Path) -> List[Tuple[Path, str, str]]:
+def find_videos(dataset_root: Path, video_list: Path | None = None) -> List[Tuple[Path, str, str]]:
     """
-    递归搜索 dataset_root/{real,fake}/**/*.mp4
+    - 若提供 video_list（每行一个 mp4 路径），按列表读取；标签根据路径包含 real/fake 判断。
+    - 否则递归搜索 dataset_root/{real,fake}/**/*.mp4。
     返回 (视频绝对路径, 标签, 唯一ID)。ID 由相对路径去后缀并用下划线连接，避免重名。
     """
     videos: List[Tuple[Path, str, str]] = []
+    if video_list:
+        with video_list.open("r", encoding="utf-8") as f:
+            for line in f:
+                p = Path(line.strip())
+                if not p.suffix.lower() == ".mp4":
+                    continue
+                label = "real" if "real" in p.parts or "Real" in p.parts else "fake"
+                vid = _slugify_path(Path(p.stem))
+                videos.append((p, label, vid))
+        return videos
+
     for label in ["real", "fake"]:
         label_dir = dataset_root / label
         if not label_dir.exists():
@@ -74,6 +86,7 @@ def process_video(
     face_extractor: BottomFaceExtractor,
     face_encoder: InsightFaceBottomEncoder,
     speech_encoder: SpeechMotionEncoder,
+    skip_existing: bool = False,
 ) -> Dict:
     """
     Process a single video: bottom-face extraction, visual/audio embeddings,
@@ -81,6 +94,18 @@ def process_video(
     """
     out_dir = output_root / label / vid
     ensure_dir(out_dir)
+
+    visual_npz = out_dir / "visual_embeddings.npz"
+    audio_npz = out_dir / "audio_embeddings.npz"
+
+    if skip_existing and visual_npz.exists() and audio_npz.exists():
+        # 已处理，直接汇总 stats（简单返回占位）
+        return {
+            "video": vid,
+            "label": label,
+            "frames_visual": -1,
+            "frames_audio": -1,
+        }
 
     # 1) Extract bottom faces
     bottom_dir = out_dir / "bottom_faces"
@@ -93,7 +118,6 @@ def process_video(
     )
 
     # 2) Visual embeddings
-    visual_npz = out_dir / "visual_embeddings.npz"
     visual_embeddings, paths = face_encoder.encode_directory(
         str(bottom_dir),
         pattern="frame_*.png",
@@ -146,6 +170,10 @@ def main():
     parser.add_argument("--dataset_root", type=str, required=True, help="Root dir with real/ and fake/ mp4")
     parser.add_argument("--output_root", type=str, required=True, help="Output root for features")
     parser.add_argument("--use_gpu", action="store_true", help="Use GPU if available")
+    parser.add_argument("--video_list", type=str, default=None, help="Optional: file with mp4 paths (one per line)")
+    parser.add_argument("--max_videos", type=int, default=None, help="Process at most N videos")
+    parser.add_argument("--start_idx", type=int, default=0, help="Start index when slicing videos")
+    parser.add_argument("--skip_existing", action="store_true", help="Skip videos whose outputs already exist")
     args = parser.parse_args()
 
     dataset_root = Path(args.dataset_root)
@@ -155,10 +183,15 @@ def main():
     device = "cuda" if args.use_gpu and os.environ.get("CUDA_VISIBLE_DEVICES", "") != "" else "cpu"
     print(f"[INFO] Using device={device}")
 
-    videos = find_videos(dataset_root)
+    video_list_path = Path(args.video_list) if args.video_list else None
+    videos = find_videos(dataset_root, video_list=video_list_path)
     if not videos:
         print(f"[ERROR] No videos found under {dataset_root}/(real|fake)/*.mp4")
         sys.exit(1)
+
+    # 切片处理
+    end_idx = None if args.max_videos is None else args.start_idx + args.max_videos
+    videos = videos[args.start_idx:end_idx]
 
     print(f"[INFO] Found {len(videos)} videos")
 
@@ -174,7 +207,8 @@ def main():
         try:
             summary = process_video(
                 vpath, label, vid, output_root,
-                face_extractor, face_encoder, speech_encoder
+                face_extractor, face_encoder, speech_encoder,
+                skip_existing=args.skip_existing,
             )
             rows.append(summary)
         except Exception as e:
