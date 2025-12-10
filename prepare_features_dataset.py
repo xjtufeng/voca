@@ -40,18 +40,24 @@ from face_extractor import BottomFaceExtractor
 from speech_encoder_anitalker import SpeechMotionEncoder
 
 
+def _slugify_path(path: Path) -> str:
+    """Convert a relative path to a safe id by replacing separators with underscores."""
+    return "_".join(path.with_suffix("").parts)
+
+
 def find_videos(dataset_root: Path) -> List[Tuple[Path, str, str]]:
     """
-    Find videos under dataset_root organized as dataset_root/{real,fake}/*.mp4
-    Returns list of (video_path, label, video_id).
+    递归搜索 dataset_root/{real,fake}/**/*.mp4
+    返回 (视频绝对路径, 标签, 唯一ID)。ID 由相对路径去后缀并用下划线连接，避免重名。
     """
-    videos = []
+    videos: List[Tuple[Path, str, str]] = []
     for label in ["real", "fake"]:
         label_dir = dataset_root / label
         if not label_dir.exists():
             continue
-        for mp4 in sorted(label_dir.glob("*.mp4")):
-            vid = mp4.stem
+        for mp4 in sorted(label_dir.rglob("*.mp4")):
+            rel = mp4.relative_to(label_dir)  # 不含 real/fake
+            vid = _slugify_path(rel)
             videos.append((mp4, label, vid))
     return videos
 
