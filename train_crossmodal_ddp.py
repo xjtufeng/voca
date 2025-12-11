@@ -23,7 +23,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
-from torch.cuda.amp import autocast, GradScaler
+from torch import amp
 
 try:
     from sklearn.metrics import accuracy_score, roc_auc_score
@@ -281,7 +281,7 @@ def train_epoch(model, loader, optimizer, scaler, device, use_contrastive, contr
         
         optimizer.zero_grad()
         
-        with autocast():
+        with amp.autocast(device_type="cuda"):
             if use_contrastive:
                 logits, v_c, a_c = model(visual, audio, return_contrast=True)
                 
@@ -448,7 +448,7 @@ def main_worker(rank, world_size, args):
     cosine_scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs - args.warmup_epochs, eta_min=1e-6)
     scheduler = SequentialLR(optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[args.warmup_epochs])
     
-    scaler = GradScaler()
+    scaler = amp.GradScaler("cuda")
     
     best_val_acc = 0.0
     best_epoch = 0
