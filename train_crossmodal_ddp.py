@@ -437,7 +437,7 @@ def main_worker(rank, world_size, args):
         num_layers=args.num_layers, num_heads=args.num_heads, dropout=args.dropout
     ).to(rank)
     
-    model = DDP(model, device_ids=[rank], find_unused_parameters=False)
+    model = DDP(model, device_ids=[rank], find_unused_parameters=True)
     
     # 优化器 & 调度器
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
