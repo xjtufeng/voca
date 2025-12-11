@@ -49,6 +49,15 @@ def list_samples(features_root: Path) -> List[Tuple[Path, int]]:
     return samples
 
 
+def compute_pos_weight(samples: List[Tuple[Path, int]]) -> float:
+    """计算正样本权重 pos_weight = #fake / #real"""
+    n_real = sum(1 for _, lab in samples if lab == 1)
+    n_fake = sum(1 for _, lab in samples if lab == 0)
+    if n_real == 0:
+        return 1.0
+    return max(1.0, n_fake / n_real)
+
+
 def split_dataset_stratified(samples: List[Tuple[Path, int]], train_ratio=0.6, val_ratio=0.2):
     """分层划分，确保每个split都有正负样本"""
     from random import shuffle
@@ -259,7 +268,7 @@ def contrastive_loss(v_proj, a_proj, labels, temperature=0.07):
 
 
 # ==================== Training ====================
-def train_epoch(model, loader, optimizer, scaler, device, use_contrastive, contrastive_weight, label_smoothing):
+def train_epoch(model, loader, optimizer, scaler, device, use_contrastive, contrastive_weight, label_smoothing, pos_weight=None):
     model.train()
     total_loss = 0.0
     total_cls_loss = 0.0
@@ -280,9 +289,13 @@ def train_epoch(model, loader, optimizer, scaler, device, use_contrastive, contr
                 if label_smoothing > 0:
                     # Label smoothing
                     labels_smooth = labels * (1 - label_smoothing) + 0.5 * label_smoothing
-                    loss_cls = F.binary_cross_entropy_with_logits(logits, labels_smooth)
+                    loss_cls = F.binary_cross_entropy_with_logits(
+                        logits, labels_smooth, pos_weight=pos_weight
+                    )
                 else:
-                    loss_cls = F.binary_cross_entropy_with_logits(logits, labels)
+                    loss_cls = F.binary_cross_entropy_with_logits(
+                        logits, labels, pos_weight=pos_weight
+                    )
                 
                 # 对比损失
                 loss_con = contrastive_loss(v_c, a_c, labels, temperature=0.07)
@@ -293,7 +306,7 @@ def train_epoch(model, loader, optimizer, scaler, device, use_contrastive, contr
                 total_con_loss += loss_con.item()
             else:
                 logits = model(visual, audio, return_contrast=False)
-                loss = F.binary_cross_entropy_with_logits(logits, labels)
+                loss = F.binary_cross_entropy_with_logits(logits, labels, pos_weight=pos_weight)
         
         scaler.scale(loss).backward()
         
@@ -374,6 +387,9 @@ def main_worker(rank, world_size, args):
     # 加载数据
     features_root = Path(args.features_root)
     samples = list_samples(features_root)
+    # 计算 pos_weight（正样本权重）
+    pos_w_value = compute_pos_weight(samples)
+    pos_weight_tensor = torch.tensor(pos_w_value, device=rank)
     
     if rank == 0:
         print(f"[INFO] Found {len(samples)} samples")
@@ -388,6 +404,7 @@ def main_worker(rank, world_size, args):
     
     if rank == 0:
         print(f"[INFO] Split: train={len(train_set)}, val={len(val_set)}, test={len(test_set)}")
+        print(f"[INFO] pos_weight (fake/real) = {pos_w_value:.2f}")
     
     # Dataset & DataLoader
     train_dataset = AVFeatDataset(train_set, args.seq_len, train=True)
@@ -441,7 +458,8 @@ def main_worker(rank, world_size, args):
         
         avg_loss, avg_cls, avg_con = train_epoch(
             model, train_loader, optimizer, scaler, rank,
-            args.use_contrastive, args.contrastive_weight, args.label_smoothing
+            args.use_contrastive, args.contrastive_weight, args.label_smoothing,
+            pos_weight=pos_weight_tensor
         )
         
         val_acc, val_auc = evaluate(model, val_loader, rank)
