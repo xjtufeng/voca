@@ -215,6 +215,13 @@ class CrossModalTransformer(nn.Module):
         v_feat = self.v_proj(v)  # (B, T, H)
         a_feat = self.a_proj(a)  # (B, T, H)
         
+        # 简易“口部运动”时序加权：用帧间差分近似口型运动能量，放大运动帧特征
+        with torch.no_grad():
+            v_shift = torch.roll(v_feat, shifts=1, dims=1)
+            motion = (v_feat - v_shift).pow(2).sum(dim=-1)  # (B, T)
+            motion = motion.softmax(dim=1)  # 归一化为权重
+        v_feat = v_feat * motion.unsqueeze(-1)
+
         # Cross-Attention: 音频query，视觉key/value
         a_cross, _ = self.cross_attn(a_feat, v_feat, v_feat)
         a_cross = self.cross_norm(a_cross + a_feat)  # 残差
