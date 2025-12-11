@@ -165,16 +165,25 @@ class CrossModalTransformer(nn.Module):
             nn.LayerNorm(hidden),
             nn.Dropout(dropout)
         )
-        
-        # Cross-Attention: 音频attend视觉
-        self.cross_attn = nn.MultiheadAttention(
+
+        # 双向 Cross-Attention
+        # 音频->视觉
+        self.a2v_attn = nn.MultiheadAttention(
             embed_dim=hidden, 
             num_heads=num_heads, 
             dropout=dropout, 
             batch_first=True
         )
-        self.cross_norm = nn.LayerNorm(hidden)
-        
+        # 视觉->音频
+        self.v2a_attn = nn.MultiheadAttention(
+            embed_dim=hidden,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True
+        )
+        self.a2v_norm = nn.LayerNorm(hidden)
+        self.v2a_norm = nn.LayerNorm(hidden)
+
         # Temporal Transformer
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=hidden,
@@ -215,19 +224,19 @@ class CrossModalTransformer(nn.Module):
         v_feat = self.v_proj(v)  # (B, T, H)
         a_feat = self.a_proj(a)  # (B, T, H)
         
-        # 简易“口部运动”时序加权：用帧间差分近似口型运动能量，放大运动帧特征
-        with torch.no_grad():
-            v_shift = torch.roll(v_feat, shifts=1, dims=1)
-            motion = (v_feat - v_shift).pow(2).sum(dim=-1)  # (B, T)
-            motion = motion.softmax(dim=1)  # 归一化为权重
-        v_feat = v_feat * motion.unsqueeze(-1)
+        # 双向 Cross-Attention
+        # 音频查询视觉
+        a2v, _ = self.a2v_attn(a_feat, v_feat, v_feat)
+        a2v = self.a2v_norm(a2v + a_feat)
+        # 视觉查询音频
+        v2a, _ = self.v2a_attn(v_feat, a_feat, a_feat)
+        v2a = self.v2a_norm(v2a + v_feat)
 
-        # Cross-Attention: 音频query，视觉key/value
-        a_cross, _ = self.cross_attn(a_feat, v_feat, v_feat)
-        a_cross = self.cross_norm(a_cross + a_feat)  # 残差
+        # 融合：简单平均
+        fused = 0.5 * (a2v + v2a)  # (B, T, H)
         
         # Temporal modeling
-        temporal_feat = self.temporal_encoder(a_cross)  # (B, T, H)
+        temporal_feat = self.temporal_encoder(fused)  # (B, T, H)
         
         # 池化：mean + max
         pooled_mean = temporal_feat.mean(dim=1)
@@ -512,7 +521,7 @@ def main():
     parser = argparse.ArgumentParser(description="DDP Cross-Modal Transformer Training")
     parser.add_argument("--features_root", type=str, required=True)
     parser.add_argument("--batch_size", type=int, default=64, help="Batch size per GPU")
-    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--seq_len", type=int, default=256)
     parser.add_argument("--hidden", type=int, default=768)
     parser.add_argument("--num_layers", type=int, default=4)
