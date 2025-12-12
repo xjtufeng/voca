@@ -3,9 +3,19 @@ Multi-GPU Distributed Training for Cross-Modal Deepfake Detection
 Transformer + Cross-Attention + Contrastive Learning
 
 Usage:
+    # Multi-GPU training (recommended):
     torchrun --nproc_per_node=4 train_crossmodal_ddp.py \
         --features_root /path/to/features \
         --batch_size 64 --epochs 50 --seq_len 256 --hidden 768
+    
+    # Single-GPU training (fallback):
+    CUDA_VISIBLE_DEVICES=0 python train_crossmodal_ddp.py \
+        --features_root /path/to/features \
+        --batch_size 64 --epochs 50 --seq_len 256 --hidden 768
+
+Note:
+    - torchrun automatically sets RANK, WORLD_SIZE, LOCAL_RANK environment variables
+    - Do NOT use torch.multiprocessing.spawn with torchrun (they are mutually exclusive)
 """
 from __future__ import annotations
 
@@ -539,17 +549,28 @@ def main():
     
     args = parser.parse_args()
     
-    world_size = torch.cuda.device_count()
-    if world_size < 1:
+    # When using torchrun, environment variables are automatically set
+    # For single-GPU training without torchrun, set defaults
+    if "RANK" in os.environ:
+        # Multi-GPU with torchrun
+        rank = int(os.environ["RANK"])
+        world_size = int(os.environ["WORLD_SIZE"])
+        local_rank = int(os.environ["LOCAL_RANK"])
+    else:
+        # Single GPU fallback
+        rank = 0
+        world_size = 1
+        local_rank = 0
+        if torch.cuda.device_count() > 1:
+            print("[WARN] Multiple GPUs detected but not using torchrun. Only GPU 0 will be used.")
+            print("[WARN] For multi-GPU training, use: torchrun --nproc_per_node=N train_crossmodal_ddp.py ...")
+    
+    if world_size < 1 or not torch.cuda.is_available():
         print("[ERROR] No GPU available")
         return
     
-    torch.multiprocessing.spawn(
-        main_worker,
-        args=(world_size, args),
-        nprocs=world_size,
-        join=True
-    )
+    # Call main_worker directly (torchrun handles process spawning)
+    main_worker(local_rank, world_size, args)
 
 
 if __name__ == "__main__":
