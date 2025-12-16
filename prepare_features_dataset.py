@@ -188,8 +188,6 @@ def main():
     if not videos:
         print(f"[ERROR] No videos found under {dataset_root}/(real|fake)/*.mp4")
         sys.exit(1)
-
-    # 切片处理
     end_idx = None if args.max_videos is None else args.start_idx + args.max_videos
     videos = videos[args.start_idx:end_idx]
 
