@@ -1,171 +1,117 @@
 #!/usr/bin/env python3
 """
-Simple GPU occupier script
-Loads features and does continuous computation to maintain GPU usage
+Stable GPU occupier script - maintains target GPU utilization
 """
 import torch
 import torch.nn as nn
 import time
-import glob
-import numpy as np
-from pathlib import Path
 import argparse
+import sys
 
 
-class DummyModel(nn.Module):
-    """Lightweight model for GPU computation"""
-    def __init__(self, input_dim=512, hidden=1024):
+class LightweightOccupier(nn.Module):
+    """Lightweight model for GPU occupation"""
+    def __init__(self, size=1024):
         super().__init__()
-        self.layers = nn.Sequential(
-            nn.Linear(input_dim, hidden),
+        self.net = nn.Sequential(
+            nn.Linear(size, size * 2),
             nn.ReLU(),
-            nn.Linear(hidden, hidden),
+            nn.Linear(size * 2, size * 2),
             nn.ReLU(),
-            nn.Linear(hidden, hidden),
-            nn.ReLU(),
-            nn.Linear(hidden, input_dim)
+            nn.Linear(size * 2, size),
         )
     
     def forward(self, x):
-        return self.layers(x)
+        return self.net(x)
 
 
-def load_random_features(features_root, batch_size=32, seq_len=256):
-    """Load random features from dataset"""
-    print(f"[INFO] Loading features from {features_root}")
-    
-    # Find some feature files
-    visual_files = list(Path(features_root).rglob("visual_embeddings.npz"))
-    if not visual_files:
-        print("[WARN] No features found, using random data")
-        return torch.randn(batch_size, seq_len, 512)
-    
-    # Load a few files
-    features = []
-    for vf in visual_files[:batch_size]:
-        try:
-            data = np.load(vf)
-            emb = data['embeddings']  # [T, 512]
-            if len(emb) >= seq_len:
-                features.append(emb[:seq_len])
-            else:
-                # Pad if needed
-                padded = np.zeros((seq_len, 512), dtype=emb.dtype)
-                padded[:len(emb)] = emb
-                features.append(padded)
-        except:
-            continue
-        
-        if len(features) >= batch_size:
-            break
-    
-    if not features:
-        print("[WARN] Failed to load features, using random data")
-        return torch.randn(batch_size, seq_len, 512)
-    
-    # Stack to batch
-    while len(features) < batch_size:
-        features.append(features[0])  # Repeat if not enough
-    
-    batch = np.stack(features[:batch_size], axis=0)  # [B, T, 512]
-    print(f"[INFO] Loaded batch: {batch.shape}")
-    return torch.from_numpy(batch).float()
-
-
-def occupy_gpu(features_root, gpu_id=0, target_usage=30, duration=None):
+def occupy_gpu_stable(gpu_id=0, target_percent=30, verbose=True):
     """
-    Occupy GPU with continuous computation
+    Occupy GPU at target percentage
     
     Args:
-        features_root: Path to features directory
         gpu_id: GPU device ID
-        target_usage: Target GPU usage percentage (approximate)
-        duration: How long to run (seconds), None = infinite
+        target_percent: Target utilization percentage (10-90)
+        verbose: Print status messages
     """
     device = torch.device(f'cuda:{gpu_id}')
-    print(f"[INFO] Using device: {device}")
-    print(f"[INFO] Target usage: ~{target_usage}%")
     
-    # Create model
-    model = DummyModel(input_dim=512, hidden=1024).to(device)
-    print(f"[INFO] Model created with {sum(p.numel() for p in model.parameters())/1e6:.2f}M parameters")
+    if verbose:
+        print(f"[INFO] GPU occupation started")
+        print(f"[INFO] Device: {device}")
+        print(f"[INFO] Target utilization: {target_percent}%")
+        print(f"[INFO] Press Ctrl+C to stop")
+        sys.stdout.flush()
     
-    # Load features
-    batch_size = 32
-    seq_len = 256
-    data = load_random_features(features_root, batch_size, seq_len).to(device)
-    print(f"[INFO] Data loaded: {data.shape} ({data.element_size() * data.nelement() / 1024**2:.2f} MB)")
+    model = LightweightOccupier(size=1024).to(device)
     
-    # Adjust computation intensity based on target usage
-    # Higher target = more iterations per loop
-    iterations_per_loop = max(1, target_usage // 10)
-    sleep_time = 0.1 if target_usage < 50 else 0.01
+    if target_percent < 20:
+        batch_size, iterations = 16, 1
+        sleep_time = 0.2
+    elif target_percent < 40:
+        batch_size, iterations = 32, 2
+        sleep_time = 0.1
+    elif target_percent < 60:
+        batch_size, iterations = 64, 4
+        sleep_time = 0.05
+    else:
+        batch_size, iterations = 128, 8
+        sleep_time = 0.01
     
-    print(f"[INFO] Starting GPU occupation loop...")
-    print(f"[INFO] Press Ctrl+C to stop")
+    data = torch.randn(batch_size, 1024, device=device)
     
-    start_time = time.time()
+    if verbose:
+        params_m = sum(p.numel() for p in model.parameters()) / 1e6
+        print(f"[INFO] Config: batch={batch_size}, iters={iterations}, sleep={sleep_time}s")
+        print(f"[INFO] Model params: {params_m:.2f}M")
+        sys.stdout.flush()
+    
     step = 0
+    start_time = time.time()
     
     try:
         while True:
-            # Do some computation
-            for _ in range(iterations_per_loop):
-                # Forward pass through each frame
-                output = model(data.reshape(-1, 512))  # [B*T, 512]
-                output = output.reshape(batch_size, seq_len, 512)
-                
-                # Some matrix operations
-                attn = torch.matmul(output, output.transpose(-2, -1))  # [B, T, T]
-                attn = torch.softmax(attn, dim=-1)
-                output = torch.matmul(attn, output)  # [B, T, 512]
-                
-                # Backward to keep gradients
+            for _ in range(iterations):
+                output = model(data)
                 loss = output.mean()
                 loss.backward()
                 model.zero_grad()
             
             step += 1
             
-            # Periodic status
-            if step % 100 == 0:
+            if verbose and step % 100 == 0:
                 elapsed = time.time() - start_time
-                print(f"[STEP {step}] Running for {elapsed:.1f}s")
+                print(f"[RUNNING] Step {step} | Elapsed: {elapsed/60:.1f} min")
+                sys.stdout.flush()
             
-            # Check duration
-            if duration and (time.time() - start_time) >= duration:
-                print(f"[INFO] Reached target duration: {duration}s")
-                break
-            
-            # Small sleep to control usage
             time.sleep(sleep_time)
     
     except KeyboardInterrupt:
-        print("\n[INFO] Interrupted by user")
-    
-    elapsed = time.time() - start_time
-    print(f"[INFO] Stopped after {elapsed:.1f}s ({step} steps)")
-    print(f"[INFO] GPU occupation complete")
+        if verbose:
+            elapsed = time.time() - start_time
+            print(f"\n[INFO] Stopped")
+            print(f"[INFO] Total runtime: {elapsed/60:.1f} min ({step} steps)")
+            sys.stdout.flush()
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Occupy GPU with computation')
-    parser.add_argument('--features_root', type=str, 
-                        default='/hpc2ssd/JH_DATA/spooler/xfeng733/FakeAV_feats',
-                        help='Path to features directory')
+    parser = argparse.ArgumentParser(description='Stable GPU occupation')
     parser.add_argument('--gpu', type=int, default=0, help='GPU device ID')
-    parser.add_argument('--usage', type=int, default=30, 
-                        help='Target GPU usage percentage (approximate)')
-    parser.add_argument('--duration', type=int, default=None,
-                        help='Duration in seconds (None = infinite)')
+    parser.add_argument('--percent', type=int, default=30, 
+                        help='Target utilization percentage (10-90, default 30)')
+    parser.add_argument('--quiet', action='store_true', 
+                        help='Quiet mode for background running')
     
     args = parser.parse_args()
     
-    occupy_gpu(
-        features_root=args.features_root,
+    if args.percent < 10 or args.percent > 90:
+        print(f"[ERROR] Percent must be between 10-90, got: {args.percent}")
+        sys.exit(1)
+    
+    occupy_gpu_stable(
         gpu_id=args.gpu,
-        target_usage=args.usage,
-        duration=args.duration
+        target_percent=args.percent,
+        verbose=not args.quiet
     )
 
 
