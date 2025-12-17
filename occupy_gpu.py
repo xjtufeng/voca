@@ -38,7 +38,19 @@ def compute_once(model, data, repeats):
     model.zero_grad(set_to_none=True)
 
 
-def occupy_gpu(gpu_id=0, target_percent=35, dim=2048):
+def configure_load(target_percent):
+    if target_percent < 20:
+        return {"batch": 32, "repeats": 2, "dim": 2048, "sleep": 0.1}
+    if target_percent < 40:
+        return {"batch": 64, "repeats": 4, "dim": 4096, "sleep": 0.05}
+    if target_percent < 60:
+        return {"batch": 96, "repeats": 6, "dim": 6144, "sleep": 0.01}
+    if target_percent < 80:
+        return {"batch": 128, "repeats": 8, "dim": 8192, "sleep": 0.0}
+    return {"batch": 160, "repeats": 10, "dim": 8192, "sleep": 0.0}
+
+
+def occupy_gpu(gpu_id=0, target_percent=35, dim=None):
     device = torch.device(f"cuda:{gpu_id}")
     if not torch.cuda.is_available():
         print("[ERROR] CUDA not available")
@@ -48,14 +60,13 @@ def occupy_gpu(gpu_id=0, target_percent=35, dim=2048):
         print(f"[ERROR] target_percent out of range: {target_percent}")
         sys.exit(1)
 
-    if target_percent < 30:
-        batch, repeats, sleep = 16, 2, 0.15
-    elif target_percent < 50:
-        batch, repeats, sleep = 32, 4, 0.05
-    elif target_percent < 70:
-        batch, repeats, sleep = 48, 6, 0.02
-    else:
-        batch, repeats, sleep = 64, 8, 0.0
+    cfg = configure_load(target_percent)
+    if dim is None:
+        dim = cfg["dim"]
+    batch, repeats, sleep = cfg["batch"], cfg["repeats"], cfg["sleep"]
+
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.set_float32_matmul_precision("high")
 
     model, data = build_workload(device, batch, dim)
 
