@@ -97,9 +97,16 @@ def occupy_gpu(features_root, gpu_id=0, target_usage=30, duration=None):
     print(f"[INFO] Data loaded: {data.shape} ({data.element_size() * data.nelement() / 1024**2:.2f} MB)")
     
     # Adjust computation intensity based on target usage
-    # Higher target = more iterations per loop
-    iterations_per_loop = max(1, target_usage // 10)
-    sleep_time = 0.1 if target_usage < 50 else 0.01
+    # For 30% target: light computation with more sleep
+    if target_usage <= 30:
+        iterations_per_loop = 1
+        sleep_time = 0.15
+    elif target_usage <= 50:
+        iterations_per_loop = 3
+        sleep_time = 0.08
+    else:
+        iterations_per_loop = max(1, target_usage // 10)
+        sleep_time = 0.01
     
     print(f"[INFO] Starting GPU occupation loop...")
     print(f"[INFO] Press Ctrl+C to stop")
