@@ -212,6 +212,8 @@ def main():
     parser.add_argument("--output_root", type=str, required=True, help="Output root for features")
     parser.add_argument("--use_gpu", action="store_true", help="Use GPU if available")
     parser.add_argument("--splits", type=str, default="train,dev,test", help="Splits to process (comma-separated)")
+    parser.add_argument("--start_idx", type=int, default=0, help="Start index (0-based) for sharding within filtered metadata")
+    parser.add_argument("--num_videos", type=int, default=None, help="Number of videos to process from start_idx (sharding)")
     parser.add_argument("--max_videos", type=int, default=None, help="Process at most N videos per split")
     parser.add_argument("--skip_existing", action="store_true", help="Skip videos whose outputs already exist")
     args = parser.parse_args()
@@ -233,6 +235,12 @@ def main():
     splits_to_process = args.splits.split(",")
     filtered_metadata = [m for m in all_metadata if m["split"] in splits_to_process]
     print(f"[INFO] Videos to process (splits={splits_to_process}): {len(filtered_metadata)}")
+
+    # 分片：start_idx + num_videos
+    if args.start_idx or args.num_videos is not None:
+        end_idx = len(filtered_metadata) if args.num_videos is None else args.start_idx + args.num_videos
+        filtered_metadata = filtered_metadata[args.start_idx:end_idx]
+        print(f"[INFO] Shard applied: start_idx={args.start_idx}, num_videos={args.num_videos}, remaining={len(filtered_metadata)}")
     
     if args.max_videos:
         filtered_metadata = filtered_metadata[:args.max_videos]
@@ -279,4 +287,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 

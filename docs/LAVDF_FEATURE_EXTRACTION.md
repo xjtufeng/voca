@@ -158,6 +158,66 @@ CUDA_VISIBLE_DEVICES=3 python prepare_lavdf_features.py \
 wait
 ```
 
+### 3.3 单卡分片并行（新增 --start_idx / --num_videos）
+在一张 A800 上并行跑多个进程，利用率更平滑，`--skip_existing` 避免重复：
+
+```bash
+# 训练集前 2 万
+CUDA_VISIBLE_DEVICES=0 python prepare_lavdf_features.py \
+  --dataset_root /hpc2hdd/home/xfeng733/LAV-DF/LAV-DF \
+  --metadata /hpc2hdd/home/xfeng733/LAV-DF/LAV-DF/metadata.min.json \
+  --output_root /hpc2hdd/home/xfeng733/LAV-DF_feats \
+  --use_gpu \
+  --splits train \
+  --start_idx 0 --num_videos 20000 \
+  --skip_existing &
+
+# 训练集后 2 万
+CUDA_VISIBLE_DEVICES=0 python prepare_lavdf_features.py \
+  --dataset_root /hpc2hdd/home/xfeng733/LAV-DF/LAV-DF \
+  --metadata /hpc2hdd/home/xfeng733/LAV-DF/LAV-DF/metadata.min.json \
+  --output_root /hpc2hdd/home/xfeng733/LAV-DF_feats \
+  --use_gpu \
+  --splits train \
+  --start_idx 20000 --num_videos 20000 \
+  --skip_existing &
+
+wait
+```
+
+如需对半切可提前生成分片 metadata 文件（可选）：
+```bash
+python - <<'PY'
+import json
+from pathlib import Path
+meta = json.load(open("/hpc2hdd/home/xfeng733/LAV-DF/LAV-DF/metadata.min.json"))
+train = [m for m in meta if m["split"] == "train"]
+half = len(train)//2
+Path("metadata_shards").mkdir(exist_ok=True)
+json.dump(train[:half], open("metadata_shards/train_part1.json","w"), ensure_ascii=False)
+json.dump(train[half:], open("metadata_shards/train_part2.json","w"), ensure_ascii=False)
+PY
+
+# 同一张卡开两个进程（各处理一半）
+CUDA_VISIBLE_DEVICES=0 nohup python prepare_lavdf_features.py \
+  --dataset_root /hpc2hdd/home/xfeng733/LAV-DF/LAV-DF \
+  --metadata metadata_shards/train_part1.json \
+  --output_root /hpc2hdd/home/xfeng733/LAV-DF_feats \
+  --use_gpu \
+  --splits train \
+  --skip_existing > train_p1.log 2>&1 &
+
+CUDA_VISIBLE_DEVICES=0 nohup python prepare_lavdf_features.py \
+  --dataset_root /hpc2hdd/home/xfeng733/LAV-DF/LAV-DF \
+  --metadata metadata_shards/train_part2.json \
+  --output_root /hpc2hdd/home/xfeng733/LAV-DF_feats \
+  --use_gpu \
+  --splits train \
+  --skip_existing > train_p2.log 2>&1 &
+
+wait
+```
+
 ### 4. 输出结构
 
 ```
@@ -211,4 +271,5 @@ print('Expected: 19/116 fake frames')
 2. **定位训练**：使用 `frame_labels`（帧级监督）
 
 定位训练脚本见：`train_lavdf_localization.py`（待创建）
+
 
