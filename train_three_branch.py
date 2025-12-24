@@ -249,12 +249,22 @@ def main():
     # Data
     parser.add_argument('--features_root', type=str, required=True,
                         help='Path to extracted features')
+    parser.add_argument('--video_root', type=str, default=None,
+                        help='Path to original videos (for CLIP)')
+    parser.add_argument('--load_video_frames', action='store_true',
+                        help='Load video frames for CLIP encoder')
     parser.add_argument('--splits', nargs='+', default=['train', 'dev'],
                         help='Dataset splits to use')
     parser.add_argument('--max_frames', type=int, default=256,
                         help='Maximum frames per video')
     
     # Model
+    parser.add_argument('--use_dfdfcg', action='store_true',
+                        help='Use DFD-FCG CLIP encoder for visual-only branch')
+    parser.add_argument('--dfdfcg_freeze', action='store_true',
+                        help='Freeze DFD-FCG CLIP encoder')
+    parser.add_argument('--dfdfcg_pretrain', type=str, default=None,
+                        help='Path to DFD-FCG pretrained weights')
     parser.add_argument('--d_model', type=int, default=512,
                         help='Hidden dimension')
     parser.add_argument('--nhead', type=int, default=8,
@@ -350,7 +360,10 @@ def main():
         ao_layers=args.ao_layers,
         vo_layers=args.vo_layers,
         dropout=args.dropout,
-        fusion_method=args.fusion_method
+        fusion_method=args.fusion_method,
+        use_dfdfcg=args.use_dfdfcg,
+        dfdfcg_pretrain=args.dfdfcg_pretrain,
+        dfdfcg_freeze=args.dfdfcg_freeze
     ).to(device)
     
     if rank == 0:
