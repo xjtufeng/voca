@@ -23,7 +23,8 @@ class ThreeBranchDataset(Dataset):
         split: str = 'train',
         max_frames: int = 256,
         load_video_frames: bool = False,
-        target_fps: int = 25
+        target_fps: int = 25,
+        ignore_missing_videos: bool = True
     ):
         """
         Args:
@@ -40,6 +41,7 @@ class ThreeBranchDataset(Dataset):
         self.max_frames = max_frames
         self.load_video_frames = load_video_frames
         self.target_fps = target_fps
+        self.ignore_missing_videos = ignore_missing_videos
         
         # Collect samples
         self.samples = []
@@ -81,8 +83,11 @@ class ThreeBranchDataset(Dataset):
                     video_path = self.video_root / rel_path.parent / (feat_file.stem + '.mp4')
                     
                     if not video_path.exists():
-                        print(f"[WARN] Video not found: {video_path}, skipping {feat_file.name}")
-                        continue
+                        print(f"[WARN] Video not found: {video_path}")
+                        if not self.ignore_missing_videos:
+                            continue
+                        # Fall back to feature-only training for this sample
+                        video_path = None
                 
                 self.samples.append({
                     'feature_path': feat_file,
@@ -257,7 +262,8 @@ def get_three_branch_dataloaders(
     num_workers: int = 4,
     max_frames: int = 256,
     load_video_frames: bool = False,
-    target_fps: int = 25
+    target_fps: int = 25,
+    ignore_missing_videos: bool = True
 ) -> Dict[str, DataLoader]:
     """
     Create dataloaders for three-branch training
@@ -284,7 +290,8 @@ def get_three_branch_dataloaders(
             split=split,
             max_frames=max_frames,
             load_video_frames=load_video_frames,
-            target_fps=target_fps
+            target_fps=target_fps,
+            ignore_missing_videos=ignore_missing_videos
         )
         
         dataloader = DataLoader(
