@@ -86,8 +86,8 @@ def train_epoch(
         
         optimizer.zero_grad()
         
-        # Forward pass with AMP
-        with autocast('cuda'):
+        # Forward pass with AMP (compatible across torch versions)
+        with autocast(enabled=(device.type == "cuda")):
             outputs = model(
                 audio=audio,
                 visual=visual,
@@ -406,7 +406,7 @@ def main():
     scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     
     # AMP scaler
-    scaler = GradScaler('cuda')
+    scaler = GradScaler(enabled=(device.type == "cuda"))
     
     # Resume from checkpoint
     start_epoch = 0
