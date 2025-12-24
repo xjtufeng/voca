@@ -43,6 +43,11 @@ class ThreeBranchDataset(Dataset):
         self.target_fps = target_fps
         self.ignore_missing_videos = ignore_missing_videos
         
+        # Build video index if loading frames
+        self.video_index = {}
+        if self.load_video_frames and self.video_root:
+            self._build_video_index()
+        
         # Collect samples
         self.samples = []
         self._load_samples()
@@ -51,6 +56,28 @@ class ThreeBranchDataset(Dataset):
         self._compute_class_weights()
         
         print(f"[INFO] {split} dataset: {len(self.samples)} samples")
+    
+    def _build_video_index(self):
+        """Build video_id -> video_path index for fast lookup"""
+        print(f"[INFO] Building video index from {self.video_root}...")
+        
+        if not self.video_root.exists():
+            print(f"[WARN] Video root does not exist: {self.video_root}")
+            return
+        
+        # Recursively find all .mp4 files
+        all_videos = list(self.video_root.rglob('*.mp4'))
+        print(f"[INFO] Found {len(all_videos)} video files")
+        
+        for video_path in all_videos:
+            # Extract video_id from filename (without extension)
+            video_id = video_path.stem
+            
+            # Store in index (handle duplicates by keeping first occurrence)
+            if video_id not in self.video_index:
+                self.video_index[video_id] = video_path
+        
+        print(f"[INFO] Video index built: {len(self.video_index)} unique video IDs")
     
     def _load_samples(self):
         """Load all samples from features directory"""
@@ -76,35 +103,15 @@ class ThreeBranchDataset(Dataset):
                 # Try to find corresponding video file if needed
                 video_path = None
                 if self.load_video_frames and self.video_root:
-                    rel_path = feat_file.relative_to(self.features_root)
-                    rel_parts = rel_path.parts  # e.g., ['fake', 'FakeAV_feats_ab', 'fake', '<vid>', 'visual_embeddings.npz']
+                    # Extract video_id from feature path
+                    # Feature path: features_root/fake/<video_id>/*.npz
+                    video_id = feat_file.parent.name
                     
-                    candidates = []
-                    # Common case: video_root/label/<vid>.mp4
-                    video_dir = rel_path.parent.name
-                    label_name = rel_parts[0] if rel_parts else ''
-                    candidates.append(self.video_root / label_name / f"{video_dir}.mp4")
-                    # Case: video_root/<vid>.mp4 (no label subdir)
-                    candidates.append(self.video_root / f"{video_dir}.mp4")
-                    # Variant: video_root/label/<vid>/<vid>.mp4
-                    candidates.append(self.video_root / label_name / video_dir / f"{video_dir}.mp4")
-                    # Original recursive path (may include shard directories)
-                    candidates.append(self.video_root / rel_path.parent / (feat_file.stem + '.mp4'))
-                    # If path contains shard like FakeAV_feats_*, try removing that shard
-                    parent_parts = list(rel_path.parent.parts)  # includes label
-                    if len(parent_parts) >= 3 and parent_parts[1].startswith("FakeAV_feats_"):
-                        parent_no_shard = Path(*([parent_parts[0]] + parent_parts[2:]))
-                        candidates.append(self.video_root / parent_no_shard / (feat_file.stem + '.mp4'))
-                        candidates.append(self.video_root / parent_no_shard / f"{video_dir}.mp4")
-                    
-                    video_path = None
-                    for cand in candidates:
-                        if cand.exists():
-                            video_path = cand
-                            break
-                    
-                    if video_path is None:
-                        print(f"[WARN] Video not found for {feat_file}, fallback to feature-only")
+                    # Look up in video index
+                    if video_id in self.video_index:
+                        video_path = self.video_index[video_id]
+                    else:
+                        # Video not found in index
                         if not self.ignore_missing_videos:
                             continue
                         # Fall back to feature-only training for this sample
