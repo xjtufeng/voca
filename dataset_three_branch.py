@@ -36,7 +36,8 @@ class ThreeBranchDataset(Dataset):
         max_frames: int = 256,
         load_video_frames: bool = False,
         target_fps: int = 25,
-        ignore_missing_videos: bool = True
+        ignore_missing_videos: bool = True,
+        frame_size: int = 224
     ):
         """
         Args:
@@ -54,6 +55,7 @@ class ThreeBranchDataset(Dataset):
         self.load_video_frames = load_video_frames
         self.target_fps = target_fps
         self.ignore_missing_videos = ignore_missing_videos
+        self.frame_size = int(frame_size)
         
         # Build video index if loading frames
         self.video_index = {}
@@ -210,6 +212,9 @@ class ThreeBranchDataset(Dataset):
             if frame_idx % frame_interval == 0:
                 # Convert BGR to RGB
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                # Resize to a fixed size for batching (CLIP expects fixed resolution)
+                if self.frame_size is not None and self.frame_size > 0:
+                    frame_rgb = cv2.resize(frame_rgb, (self.frame_size, self.frame_size), interpolation=cv2.INTER_AREA)
                 frames.append(frame_rgb)
                 
                 if len(frames) >= self.max_frames:
