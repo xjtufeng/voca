@@ -76,14 +76,33 @@ class ThreeBranchDataset(Dataset):
                 # Try to find corresponding video file if needed
                 video_path = None
                 if self.load_video_frames and self.video_root:
-                    # Reconstruct video path from feature path
-                    # Feature: features_root/real/..../video_id.npz
-                    # Video:   video_root/real/..../video_id.mp4
                     rel_path = feat_file.relative_to(self.features_root)
-                    video_path = self.video_root / rel_path.parent / (feat_file.stem + '.mp4')
+                    rel_parts = rel_path.parts  # e.g., ['fake', 'FakeAV_feats_ab', 'fake', '<vid>', 'visual_embeddings.npz']
                     
-                    if not video_path.exists():
-                        print(f"[WARN] Video not found: {video_path}")
+                    candidates = []
+                    # Common case: video_root/label/<vid>.mp4
+                    video_dir = rel_path.parent.name
+                    label_name = rel_parts[0] if rel_parts else ''
+                    candidates.append(self.video_root / label_name / f"{video_dir}.mp4")
+                    # Variant: video_root/label/<vid>/<vid>.mp4
+                    candidates.append(self.video_root / label_name / video_dir / f"{video_dir}.mp4")
+                    # Original recursive path (may include shard directories)
+                    candidates.append(self.video_root / rel_path.parent / (feat_file.stem + '.mp4'))
+                    # If path contains shard like FakeAV_feats_*, try removing that shard
+                    parent_parts = list(rel_path.parent.parts)  # includes label
+                    if len(parent_parts) >= 3 and parent_parts[1].startswith("FakeAV_feats_"):
+                        parent_no_shard = Path(*([parent_parts[0]] + parent_parts[2:]))
+                        candidates.append(self.video_root / parent_no_shard / (feat_file.stem + '.mp4'))
+                        candidates.append(self.video_root / parent_no_shard / f"{video_dir}.mp4")
+                    
+                    video_path = None
+                    for cand in candidates:
+                        if cand.exists():
+                            video_path = cand
+                            break
+                    
+                    if video_path is None:
+                        print(f\"[WARN] Video not found for {feat_file}, fallback to feature-only\")
                         if not self.ignore_missing_videos:
                             continue
                         # Fall back to feature-only training for this sample
