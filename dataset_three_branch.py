@@ -84,6 +84,8 @@ class ThreeBranchDataset(Dataset):
                     video_dir = rel_path.parent.name
                     label_name = rel_parts[0] if rel_parts else ''
                     candidates.append(self.video_root / label_name / f"{video_dir}.mp4")
+                    # Case: video_root/<vid>.mp4 (no label subdir)
+                    candidates.append(self.video_root / f"{video_dir}.mp4")
                     # Variant: video_root/label/<vid>/<vid>.mp4
                     candidates.append(self.video_root / label_name / video_dir / f"{video_dir}.mp4")
                     # Original recursive path (may include shard directories)
