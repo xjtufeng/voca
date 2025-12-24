@@ -22,7 +22,7 @@ from tqdm import tqdm
 import numpy as np
 from sklearn.metrics import roc_auc_score, f1_score, precision_score, recall_score
 
-from dataset_localization import get_dataloaders
+from dataset_three_branch import get_three_branch_dataloaders
 from model_three_branch import (
     ThreeBranchJointModel,
     compute_three_branch_loss
@@ -76,8 +76,13 @@ def train_epoch(
     for batch_idx, batch in enumerate(pbar):
         visual = batch['visual'].to(device)
         audio = batch['audio'].to(device)
-        video_labels = batch['video_labels'].to(device)
+        labels = batch['label'].to(device)
         mask = batch['mask'].to(device)
+        
+        # Optional: video frames for CLIP
+        video_frames = batch.get('video_frames')
+        if video_frames is not None:
+            video_frames = video_frames.to(device)
         
         optimizer.zero_grad()
         
@@ -86,6 +91,7 @@ def train_epoch(
             outputs = model(
                 audio=audio,
                 visual=visual,
+                video_frames=video_frames,
                 mask=mask,
                 return_branch_outputs=True
             )
@@ -93,7 +99,7 @@ def train_epoch(
             # Compute multi-task loss
             losses = compute_three_branch_loss(
                 outputs=outputs,
-                labels=video_labels,
+                labels=labels,
                 branch_weights=(
                     args.cm_loss_weight,
                     args.ao_loss_weight,
@@ -154,13 +160,19 @@ def evaluate(
     for batch in pbar:
         visual = batch['visual'].to(device)
         audio = batch['audio'].to(device)
-        video_labels = batch['video_labels'].to(device)
+        labels = batch['label'].to(device)
         mask = batch['mask'].to(device)
+        
+        # Optional: video frames for CLIP
+        video_frames = batch.get('video_frames')
+        if video_frames is not None:
+            video_frames = video_frames.to(device)
         
         # Forward pass
         outputs = model(
             audio=audio,
             visual=visual,
+            video_frames=video_frames,
             mask=mask,
             return_branch_outputs=True
         )
@@ -182,7 +194,7 @@ def evaluate(
             weights = outputs['fusion_weights'].cpu().numpy()
             all_fusion_weights.append(weights)
         
-        all_labels.extend(video_labels.cpu().numpy())
+        all_labels.extend(labels.cpu().numpy())
     
     # Convert to numpy
     for key in all_preds:
@@ -336,8 +348,10 @@ def main():
     if rank == 0:
         print(f"\n[INFO] Loading data from {args.features_root}")
     
-    dataloaders = get_dataloaders(
+    dataloaders = get_three_branch_dataloaders(
         features_root=args.features_root,
+        video_root=args.video_root,
+        load_video_frames=args.load_video_frames,
         splits=args.splits,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
