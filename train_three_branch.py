@@ -361,13 +361,21 @@ def main():
     train_loader = dataloaders.get('train')
     val_loader = dataloaders.get('dev') or dataloaders.get('test')
     
+    # Infer feature dimensions from dataset (avoid hardcoding a_dim/v_dim)
+    # This is critical because FakeAV audio embeddings are typically 512-d in this repo.
+    sample0 = train_loader.dataset[0]
+    inferred_a_dim = int(sample0['audio'].shape[-1])
+    inferred_v_dim = int(sample0['visual'].shape[-1])
+    if rank == 0:
+        print(f"[INFO] Inferred dims: a_dim={inferred_a_dim}, v_dim={inferred_v_dim}")
+
     # Create model
     if rank == 0:
         print(f"\n[INFO] Creating three-branch model...")
     
     model = ThreeBranchJointModel(
-        v_dim=512,
-        a_dim=1024,
+        v_dim=inferred_v_dim,
+        a_dim=inferred_a_dim,
         d_model=args.d_model,
         nhead=args.nhead,
         cm_layers=args.cm_layers,
