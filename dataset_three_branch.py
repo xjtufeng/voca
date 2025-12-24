@@ -6,9 +6,21 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
 import numpy as np
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
+import hashlib
 import cv2
-from PIL import Image
+
+_VIDEO_INDEX_CACHE: Dict[str, Dict[str, Path]] = {}
+
+
+def _slugify_path(path: Path) -> str:
+    """Match prepare_features_dataset.py: join path parts (without suffix) with underscores."""
+    return "_".join(path.with_suffix("").parts)
+
+
+def _split_bucket(video_id: str) -> int:
+    """Stable 0..9 bucket for train/dev/test splitting."""
+    return int(hashlib.md5(video_id.encode("utf-8")).hexdigest(), 16) % 10
 
 
 class ThreeBranchDataset(Dataset):
@@ -59,6 +71,12 @@ class ThreeBranchDataset(Dataset):
     
     def _build_video_index(self):
         """Build video_id -> video_path index for fast lookup"""
+        cache_key = str(self.video_root)
+        if cache_key in _VIDEO_INDEX_CACHE:
+            self.video_index = _VIDEO_INDEX_CACHE[cache_key]
+            print(f"[INFO] Reusing cached video index: {len(self.video_index)} entries")
+            return
+
         print(f"[INFO] Building video index from {self.video_root}...")
         
         if not self.video_root.exists():
@@ -70,14 +88,41 @@ class ThreeBranchDataset(Dataset):
         print(f"[INFO] Found {len(all_videos)} video files")
         
         for video_path in all_videos:
-            # Extract video_id from filename (without extension)
-            video_id = video_path.stem
-            
-            # Store in index (handle duplicates by keeping first occurrence)
-            if video_id not in self.video_index:
-                self.video_index[video_id] = video_path
+            # Prefer a key compatible with prepare_features_dataset.py
+            # video_id = slugify(relpath_under_label_dir)
+            vid_key = None
+            try:
+                if "real" in video_path.parts:
+                    rel = video_path.relative_to(self.video_root / "real")
+                    vid_key = _slugify_path(rel)
+                elif "fake" in video_path.parts:
+                    rel = video_path.relative_to(self.video_root / "fake")
+                    vid_key = _slugify_path(rel)
+            except Exception:
+                vid_key = None
+
+            # Also keep basename (stem) as fallback
+            keys = []
+            if vid_key:
+                keys.append(vid_key)
+            keys.append(video_path.stem)
+
+            for k in keys:
+                if k not in self.video_index:
+                    self.video_index[k] = video_path
         
         print(f"[INFO] Video index built: {len(self.video_index)} unique video IDs")
+        _VIDEO_INDEX_CACHE[cache_key] = self.video_index
+
+    def _is_in_split(self, video_id: str) -> bool:
+        b = _split_bucket(video_id)
+        if self.split == "train":
+            return b <= 7  # 80%
+        if self.split == "dev":
+            return b == 8  # 10%
+        if self.split == "test":
+            return b == 9  # 10%
+        return True
     
     def _load_samples(self):
         """Load all samples from features directory"""
@@ -98,30 +143,29 @@ class ThreeBranchDataset(Dataset):
                 print(f"[WARN] Directory not found: {label_path}")
                 continue
             
-            # Find all .npz files recursively
-            for feat_file in label_path.rglob('*.npz'):
-                # Try to find corresponding video file if needed
+            # Each video is a directory: label_path/<video_id>/{audio_embeddings.npz, visual_embeddings.npz, ...}
+            for video_dir in sorted([p for p in label_path.iterdir() if p.is_dir()]):
+                video_id = video_dir.name
+                if not self._is_in_split(video_id):
+                    continue
+
+                audio_npz = video_dir / "audio_embeddings.npz"
+                visual_npz = video_dir / "visual_embeddings.npz"
+                if (not audio_npz.exists()) or (not visual_npz.exists()):
+                    continue
+
                 video_path = None
                 if self.load_video_frames and self.video_root:
-                    # Extract video_id from feature path
-                    # Feature path: features_root/fake/<video_id>/*.npz
-                    video_id = feat_file.parent.name
-                    
-                    # Look up in video index
-                    if video_id in self.video_index:
-                        video_path = self.video_index[video_id]
-                    else:
-                        # Video not found in index
-                        if not self.ignore_missing_videos:
-                            continue
-                        # Fall back to feature-only training for this sample
-                        video_path = None
-                
+                    video_path = self.video_index.get(video_id)
+                    if video_path is None and not self.ignore_missing_videos:
+                        continue
+
                 self.samples.append({
-                    'feature_path': feat_file,
+                    'audio_path': audio_npz,
+                    'visual_path': visual_npz,
                     'video_path': video_path,
                     'label': label,
-                    'video_id': feat_file.stem
+                    'video_id': video_id
                 })
     
     def _compute_class_weights(self):
@@ -183,16 +227,15 @@ class ThreeBranchDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         sample = self.samples[idx]
         
-        # Load features
-        data = np.load(sample['feature_path'], allow_pickle=True)
-        
-        # Audio features
-        audio_feats = data['audio_embeddings']  # [T, 1024]
+        # Load features (stored in separate npz files, key is 'embeddings')
+        audio_data = np.load(sample['audio_path'], allow_pickle=True)
+        visual_data = np.load(sample['visual_path'], allow_pickle=True)
+
+        audio_feats = audio_data['embeddings']  # [T, a_dim]
         if len(audio_feats) > self.max_frames:
             audio_feats = audio_feats[:self.max_frames]
         
-        # Visual features (InsightFace)
-        visual_feats = data['visual_embeddings']  # [T, 512]
+        visual_feats = visual_data['embeddings']  # [T, v_dim]
         if len(visual_feats) > self.max_frames:
             visual_feats = visual_feats[:self.max_frames]
         
@@ -247,11 +290,12 @@ def collate_three_branch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
     labels = torch.zeros(batch_size)
     mask = torch.ones(batch_size, max_len, dtype=torch.bool)  # True = padded
     
-    # Handle video frames
-    has_video_frames = 'video_frames' in batch[0]
+    # Handle video frames (some samples may fall back to feature-only)
+    has_video_frames = any('video_frames' in b for b in batch)
     if has_video_frames:
         # Get dimensions from first sample
-        _, C, H, W = batch[0]['video_frames'].shape
+        first = next(b for b in batch if 'video_frames' in b)
+        _, C, H, W = first['video_frames'].shape
         video_frames_batch = torch.zeros(batch_size, max_len, C, H, W)
     
     video_ids = []
@@ -265,7 +309,7 @@ def collate_three_branch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
         mask[i, :seq_len] = False  # False = valid
         video_ids.append(sample['video_id'])
         
-        if has_video_frames:
+        if has_video_frames and 'video_frames' in sample:
             video_frames_batch[i, :seq_len] = sample['video_frames']
     
     result = {
