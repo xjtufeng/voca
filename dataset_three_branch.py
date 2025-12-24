@@ -102,7 +102,7 @@ class ThreeBranchDataset(Dataset):
                             break
                     
                     if video_path is None:
-                        print(f\"[WARN] Video not found for {feat_file}, fallback to feature-only\")
+                        print(f"[WARN] Video not found for {feat_file}, fallback to feature-only")
                         if not self.ignore_missing_videos:
                             continue
                         # Fall back to feature-only training for this sample
