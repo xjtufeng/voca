@@ -151,6 +151,21 @@ def evaluate(
     all_preds = {'fused': [], 'cm': [], 'ao': [], 'vo': []}
     all_labels = []
     all_fusion_weights = []
+
+    def _ensure_2d_fusion_weights(w: np.ndarray) -> np.ndarray:
+        """
+        Normalize fusion weights to shape [N, 3].
+        Supports inputs like [3], [B, 3], or higher-rank tensors.
+        """
+        w = np.asarray(w)
+        if w.ndim == 1:
+            # [3] -> [1, 3]
+            return w.reshape(1, -1)
+        if w.ndim == 2:
+            # [B, 3]
+            return w
+        # [..., 3] -> [N, 3]
+        return w.reshape(-1, w.shape[-1])
     
     if rank == 0:
         pbar = tqdm(loader, desc="Evaluating")
@@ -191,8 +206,11 @@ def evaluate(
             all_preds['vo'].extend(vo_probs)
         
         if 'fusion_weights' in outputs:
-            weights = outputs['fusion_weights'].cpu().numpy()
-            all_fusion_weights.append(weights)
+            weights = outputs['fusion_weights'].detach().cpu().numpy()
+            weights = _ensure_2d_fusion_weights(weights)
+            # Expect 3 branches: [cm, ao, vo]
+            if weights.shape[-1] >= 3:
+                all_fusion_weights.append(weights[:, :3])
         
         all_labels.extend(labels.cpu().numpy())
     
@@ -226,9 +244,10 @@ def evaluate(
     # Fusion weights statistics
     if len(all_fusion_weights) > 0:
         all_fusion_weights = np.concatenate(all_fusion_weights, axis=0)
-        metrics['fusion_weight_cm'] = all_fusion_weights[:, 0].mean()
-        metrics['fusion_weight_ao'] = all_fusion_weights[:, 1].mean()
-        metrics['fusion_weight_vo'] = all_fusion_weights[:, 2].mean()
+        if all_fusion_weights.ndim == 2 and all_fusion_weights.shape[1] >= 3:
+            metrics['fusion_weight_cm'] = float(all_fusion_weights[:, 0].mean())
+            metrics['fusion_weight_ao'] = float(all_fusion_weights[:, 1].mean())
+            metrics['fusion_weight_vo'] = float(all_fusion_weights[:, 2].mean())
     
     return metrics
 
