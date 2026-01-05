@@ -315,7 +315,9 @@ def collate_three_branch(batch: List[Dict]) -> Dict[str, torch.Tensor]:
         video_ids.append(sample['video_id'])
         
         if has_video_frames and 'video_frames' in sample:
-            video_frames_batch[i, :seq_len] = sample['video_frames']
+            # Use actual video_frames length, not audio length
+            T_frames = sample['video_frames'].shape[0]
+            video_frames_batch[i, :T_frames] = sample['video_frames']
     
     result = {
         'audio': audio_batch,
