@@ -121,3 +121,4 @@ pkill -f occupy_gpu.py
 
 GPU-Util should be around **30-40%** for `--percent 30`.
 
+

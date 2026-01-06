@@ -233,11 +233,13 @@ def evaluate(
             f1 = f1_score(all_labels, preds_binary)
             precision = precision_score(all_labels, preds_binary, zero_division=0)
             recall = recall_score(all_labels, preds_binary, zero_division=0)
+            accuracy = (preds_binary == all_labels).mean()
             
             metrics[f'{branch_name}_auc'] = auc
             metrics[f'{branch_name}_f1'] = f1
             metrics[f'{branch_name}_precision'] = precision
             metrics[f'{branch_name}_recall'] = recall
+            metrics[f'{branch_name}_accuracy'] = accuracy
         except:
             pass
     

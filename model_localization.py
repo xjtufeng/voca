@@ -6,7 +6,7 @@ Cross-modal Transformer with temporal encoding for frame-wise classification
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict
 
 
 class FrameLocalizationModel(nn.Module):
@@ -77,9 +77,9 @@ class FrameLocalizationModel(nn.Module):
         )
         self.temporal_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         
-        # Frame-level classifier
+        # Frame-level classifier (input: temporal context + similarity)
         self.frame_classifier = nn.Sequential(
-            nn.Linear(d_model, d_model // 2),
+            nn.Linear(d_model + 1, d_model // 2),  # +1 for frame similarity
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(d_model // 2, 1)
@@ -99,7 +99,7 @@ class FrameLocalizationModel(nn.Module):
         visual: torch.Tensor, 
         audio: torch.Tensor, 
         mask: Optional[torch.Tensor] = None
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         Args:
             visual: [B, T, v_dim] visual features
@@ -109,12 +109,22 @@ class FrameLocalizationModel(nn.Module):
         Returns:
             frame_logits: [B, T, 1] per-frame fake logits
             video_logit: [B, 1] video-level fake logit (if use_video_head)
+            frame_similarity: [B, T, 1] per-frame audio-visual similarity (for visualization)
         """
         B, T, _ = visual.shape
         
         # Project to common dimension
         v = self.v_proj(visual)  # [B, T, d_model]
         a = self.a_proj(audio)   # [B, T, d_model]
+        
+        # Compute frame-level audio-visual similarity (CORE SIGNAL)
+        # Normalize to unit vectors for cosine similarity
+        v_norm = F.normalize(v, dim=-1, eps=1e-8)  # [B, T, d_model]
+        a_norm = F.normalize(a, dim=-1, eps=1e-8)  # [B, T, d_model]
+        
+        # Cosine similarity per frame
+        frame_similarity = (v_norm * a_norm).sum(dim=-1, keepdim=True)  # [B, T, 1], range [-1, 1]
+        # High similarity (→1) = real, Low similarity (→0 or -1) = fake
         
         # Cross-modal attention
         if self.use_cross_attn:
@@ -139,8 +149,11 @@ class FrameLocalizationModel(nn.Module):
         # Temporal encoding
         encoded = self.temporal_encoder(fused, src_key_padding_mask=mask)  # [B, T, d_model]
         
+        # Concatenate similarity with temporal context for classification
+        classifier_input = torch.cat([encoded, frame_similarity], dim=-1)  # [B, T, d_model + 1]
+        
         # Frame-level classification
-        frame_logits = self.frame_classifier(encoded)  # [B, T, 1]
+        frame_logits = self.frame_classifier(classifier_input)  # [B, T, 1]
         
         # Video-level classification (pooling + classifier)
         video_logit = None
@@ -155,7 +168,7 @@ class FrameLocalizationModel(nn.Module):
             
             video_logit = self.video_classifier(pooled)  # [B, 1]
         
-        return frame_logits, video_logit
+        return frame_logits, video_logit, frame_similarity
 
 
 class FocalLoss(nn.Module):
@@ -294,6 +307,128 @@ def compute_temporal_smoothness_loss(
     return loss
 
 
+def compute_similarity_supervision_loss(
+    frame_similarity: torch.Tensor,
+    frame_labels: torch.Tensor,
+    mask: torch.Tensor
+) -> torch.Tensor:
+    """
+    Similarity supervision loss
+    Encourage high similarity for real frames, low for fake frames
+    
+    Args:
+        frame_similarity: [B, T, 1] cosine similarity in range [-1, 1]
+        frame_labels: [B, T] frame labels (0=real, 1=fake)
+        mask: [B, T] padding mask
+    
+    Returns:
+        Scalar loss
+    """
+    # Squeeze similarity
+    sim_flat = frame_similarity.squeeze(-1)  # [B, T]
+    
+    # Target: real frames (label=0) should have high similarity (→1)
+    #         fake frames (label=1) should have low similarity (→0)
+    target_sim = 1.0 - frame_labels.float()  # [B, T], real=1, fake=0
+    
+    # MSE loss
+    sim_diff = (sim_flat - target_sim) ** 2  # [B, T]
+    
+    if mask is not None:
+        sim_diff = sim_diff.masked_fill(mask, 0)
+        valid_count = (~mask).sum()
+    else:
+        valid_count = sim_diff.numel()
+    
+    if valid_count == 0:
+        return torch.tensor(0.0, device=frame_similarity.device)
+    
+    loss = sim_diff.sum() / valid_count
+    return loss
+
+
+def compute_combined_loss(
+    frame_logits: torch.Tensor,
+    frame_labels: torch.Tensor,
+    mask: torch.Tensor,
+    frame_similarity: Optional[torch.Tensor] = None,
+    video_logit: Optional[torch.Tensor] = None,
+    video_label: Optional[torch.Tensor] = None,
+    frame_loss_weight: float = 1.0,
+    video_loss_weight: float = 0.3,
+    smooth_loss_weight: float = 0.1,
+    similarity_loss_weight: float = 0.2,
+    pos_weight: Optional[float] = None,
+    use_focal: bool = False,
+    focal_alpha: float = 0.25,
+    focal_gamma: float = 2.0
+) -> Dict[str, torch.Tensor]:
+    """
+    Compute combined loss with frame, video, smooth, and similarity losses
+    
+    Args:
+        frame_logits: [B, T, 1] frame logits
+        frame_labels: [B, T] frame labels
+        mask: [B, T] padding mask
+        frame_similarity: [B, T, 1] cosine similarity (optional)
+        video_logit: [B, 1] video logit (optional)
+        video_label: [B] video label (optional)
+        frame_loss_weight: Weight for frame loss
+        video_loss_weight: Weight for video loss
+        smooth_loss_weight: Weight for smoothness loss
+        similarity_loss_weight: Weight for similarity loss
+        pos_weight: Positive class weight for BCE
+        use_focal: Use Focal Loss instead of BCE
+        focal_alpha: Focal loss alpha
+        focal_gamma: Focal loss gamma
+    
+    Returns:
+        Dict with 'total', 'frame', 'video', 'smooth', 'similarity' losses
+    """
+    # Frame loss
+    frame_loss = compute_frame_loss(
+        frame_logits, frame_labels, mask,
+        pos_weight=pos_weight,
+        use_focal=use_focal,
+        focal_alpha=focal_alpha,
+        focal_gamma=focal_gamma
+    )
+    
+    # Video loss
+    video_loss = torch.tensor(0.0, device=frame_logits.device)
+    if video_logit is not None and video_label is not None:
+        video_loss = compute_video_loss(video_logit, video_label)
+    
+    # Smoothness loss
+    smooth_loss = torch.tensor(0.0, device=frame_logits.device)
+    if smooth_loss_weight > 0:
+        frame_probs = torch.sigmoid(frame_logits.squeeze(-1))
+        smooth_loss = compute_temporal_smoothness_loss(frame_probs, mask)
+    
+    # Similarity supervision loss
+    similarity_loss = torch.tensor(0.0, device=frame_logits.device)
+    if similarity_loss_weight > 0 and frame_similarity is not None:
+        similarity_loss = compute_similarity_supervision_loss(
+            frame_similarity, frame_labels, mask
+        )
+    
+    # Total loss
+    total_loss = (
+        frame_loss_weight * frame_loss +
+        video_loss_weight * video_loss +
+        smooth_loss_weight * smooth_loss +
+        similarity_loss_weight * similarity_loss
+    )
+    
+    return {
+        'total': total_loss,
+        'frame': frame_loss,
+        'video': video_loss,
+        'smooth': smooth_loss,
+        'similarity': similarity_loss
+    }
+
+
 if __name__ == '__main__':
     # Test model
     print("[TEST] Creating model...")
@@ -317,24 +452,36 @@ if __name__ == '__main__':
     mask[:, 200:] = True  # Mask last 56 frames
     
     print(f"\n[TEST] Forward pass...")
-    frame_logits, video_logit = model(visual, audio, mask)
+    frame_logits, video_logit, frame_similarity = model(visual, audio, mask)
     print(f"Frame logits: {frame_logits.shape}")
     print(f"Video logit: {video_logit.shape}")
+    print(f"Frame similarity: {frame_similarity.shape}")
+    print(f"Similarity range: [{frame_similarity.min():.3f}, {frame_similarity.max():.3f}]")
     
     # Test loss computation
     frame_labels = torch.randint(0, 2, (B, T))
     video_labels = torch.randint(0, 2, (B,))
     
-    frame_loss = compute_frame_loss(frame_logits, frame_labels, mask, pos_weight=5.0)
-    video_loss = compute_video_loss(video_logit, video_labels)
-    
-    frame_probs = torch.sigmoid(frame_logits.squeeze(-1))
-    smooth_loss = compute_temporal_smoothness_loss(frame_probs, mask)
+    losses = compute_combined_loss(
+        frame_logits=frame_logits,
+        frame_labels=frame_labels,
+        mask=mask,
+        frame_similarity=frame_similarity,
+        video_logit=video_logit,
+        video_label=video_labels,
+        frame_loss_weight=1.0,
+        video_loss_weight=0.3,
+        smooth_loss_weight=0.1,
+        similarity_loss_weight=0.2,
+        pos_weight=5.0
+    )
     
     print(f"\n[TEST] Losses:")
-    print(f"Frame loss: {frame_loss.item():.4f}")
-    print(f"Video loss: {video_loss.item():.4f}")
-    print(f"Smoothness loss: {smooth_loss.item():.4f}")
+    print(f"Total loss: {losses['total'].item():.4f}")
+    print(f"Frame loss: {losses['frame'].item():.4f}")
+    print(f"Video loss: {losses['video'].item():.4f}")
+    print(f"Smooth loss: {losses['smooth'].item():.4f}")
+    print(f"Similarity loss: {losses['similarity'].item():.4f}")
     
     print(f"\n[TEST] Model test passed!")
 

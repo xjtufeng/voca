@@ -27,7 +27,8 @@ from model_localization import (
     FrameLocalizationModel,
     compute_frame_loss,
     compute_video_loss,
-    compute_temporal_smoothness_loss
+    compute_temporal_smoothness_loss,
+    compute_combined_loss
 )
 
 
@@ -69,6 +70,7 @@ def train_epoch(
     total_frame_loss = 0
     total_video_loss = 0
     total_smooth_loss = 0
+    total_similarity_loss = 0
     
     if rank == 0:
         pbar = tqdm(loader, desc=f"Epoch {epoch} [Train]")
@@ -86,33 +88,31 @@ def train_epoch(
         
         # Forward pass with AMP
         with autocast('cuda'):
-            frame_logits, video_logit = model(visual, audio, mask)
+            frame_logits, video_logit, frame_similarity = model(visual, audio, mask)
             
-            # Compute losses
-            frame_loss = compute_frame_loss(
-                frame_logits, frame_labels, mask,
+            # Compute losses using combined loss function
+            losses = compute_combined_loss(
+                frame_logits=frame_logits,
+                frame_labels=frame_labels,
+                mask=mask,
+                frame_similarity=frame_similarity,
+                video_logit=video_logit,
+                video_label=video_labels,
+                frame_loss_weight=1.0,
+                video_loss_weight=args.video_loss_weight,
+                smooth_loss_weight=args.smooth_loss_weight,
+                similarity_loss_weight=args.similarity_loss_weight if hasattr(args, 'similarity_loss_weight') else 0.2,
                 pos_weight=args.pos_weight if args.pos_weight > 0 else None,
                 use_focal=args.use_focal,
                 focal_alpha=args.focal_alpha,
                 focal_gamma=args.focal_gamma
             )
             
-            loss = frame_loss
-            
-            # Video-level auxiliary loss
-            if video_logit is not None and args.video_loss_weight > 0:
-                video_loss = compute_video_loss(video_logit, video_labels)
-                loss = loss + args.video_loss_weight * video_loss
-            else:
-                video_loss = torch.tensor(0.0)
-            
-            # Temporal smoothness regularization
-            if args.smooth_loss_weight > 0:
-                frame_probs = torch.sigmoid(frame_logits.squeeze(-1))
-                smooth_loss = compute_temporal_smoothness_loss(frame_probs, mask)
-                loss = loss + args.smooth_loss_weight * smooth_loss
-            else:
-                smooth_loss = torch.tensor(0.0)
+            loss = losses['total']
+            frame_loss = losses['frame']
+            video_loss = losses['video']
+            smooth_loss = losses['smooth']
+            similarity_loss = losses['similarity']
         
         # Backward pass with AMP
         scaler.scale(loss).backward()
@@ -130,13 +130,14 @@ def train_epoch(
         total_frame_loss += frame_loss.item()
         total_video_loss += video_loss.item()
         total_smooth_loss += smooth_loss.item()
+        total_similarity_loss = total_similarity_loss + similarity_loss.item() if 'total_similarity_loss' in locals() else similarity_loss.item()
         
         # Update progress bar
         if rank == 0:
             pbar.set_postfix({
                 'loss': f'{loss.item():.4f}',
                 'frame': f'{frame_loss.item():.4f}',
-                'video': f'{video_loss.item():.4f}'
+                'sim': f'{similarity_loss.item():.4f}'
             })
     
     num_batches = len(loader)
@@ -144,7 +145,8 @@ def train_epoch(
         'loss': total_loss / num_batches,
         'frame_loss': total_frame_loss / num_batches,
         'video_loss': total_video_loss / num_batches,
-        'smooth_loss': total_smooth_loss / num_batches
+        'smooth_loss': total_smooth_loss / num_batches,
+        'similarity_loss': total_similarity_loss / num_batches if 'total_similarity_loss' in locals() else 0.0
     }
 
 
@@ -178,7 +180,7 @@ def evaluate(
         mask = batch['mask'].to(device)
         
         # Forward pass
-        frame_logits, video_logit = model(visual, audio, mask)
+        frame_logits, video_logit, frame_similarity = model(visual, audio, mask)
         
         # Compute loss
         frame_loss = compute_frame_loss(
@@ -303,6 +305,8 @@ def main():
                         help='Weight for video-level auxiliary loss')
     parser.add_argument('--smooth_loss_weight', type=float, default=0.1,
                         help='Weight for temporal smoothness regularization')
+    parser.add_argument('--similarity_loss_weight', type=float, default=0.2,
+                        help='Weight for similarity supervision loss')
     
     # Training
     parser.add_argument('--batch_size', type=int, default=8,
