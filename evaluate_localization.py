@@ -272,11 +272,21 @@ def main():
     checkpoint = torch.load(args.checkpoint, map_location=device)
     
     model_args = checkpoint.get('args', {})
+    state = checkpoint.get('model_state_dict', {})
+
+    # Infer feature dims from checkpoint (supports DDP prefix "module.")
+    v_key = 'v_proj.weight' if 'v_proj.weight' in state else 'module.v_proj.weight'
+    a_key = 'a_proj.weight' if 'a_proj.weight' in state else 'module.a_proj.weight'
+    if v_key not in state or a_key not in state:
+        raise KeyError("Cannot infer v_dim/a_dim from checkpoint (missing v_proj.weight/a_proj.weight).")
+    inferred_v_dim = int(state[v_key].shape[1])
+    inferred_a_dim = int(state[a_key].shape[1])
+    print(f"[INFO] Inferred dims from checkpoint: v_dim={inferred_v_dim}, a_dim={inferred_a_dim}")
     
     # Create model
     model = FrameLocalizationModel(
-        v_dim=512,
-        a_dim=1024,
+        v_dim=inferred_v_dim,
+        a_dim=inferred_a_dim,
         d_model=model_args.get('d_model', 512),
         nhead=model_args.get('nhead', 8),
         num_layers=model_args.get('num_layers', 4),

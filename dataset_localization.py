@@ -193,9 +193,13 @@ def collate_variable_length(batch: List[Dict]) -> Dict[str, torch.Tensor]:
     max_len = max(item['num_frames'] for item in batch)
     batch_size = len(batch)
     
+    # Infer feature dims from batch to avoid hardcoding (audio can be 512-d or 1024-d)
+    visual_dim = int(batch[0]['visual'].size(-1))
+    audio_dim = int(batch[0]['audio'].size(-1))
+
     # Initialize padded tensors
-    visual_padded = torch.zeros(batch_size, max_len, 512)
-    audio_padded = torch.zeros(batch_size, max_len, 1024)
+    visual_padded = torch.zeros(batch_size, max_len, visual_dim)
+    audio_padded = torch.zeros(batch_size, max_len, audio_dim)
     frame_labels_padded = torch.zeros(batch_size, max_len, dtype=torch.long)
     mask = torch.ones(batch_size, max_len, dtype=torch.bool)  # True = padding
     

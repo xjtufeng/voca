@@ -366,6 +366,16 @@ def main():
     train_loader = dataloaders.get('train')
     val_loader = dataloaders.get('dev') or dataloaders.get('test')
     
+    # Infer feature dimensions from dataset to avoid hardcoding.
+    # LAV-DF audio embeddings can be 512-d (motion latent) or 1024-d depending on extraction.
+    if train_loader is None:
+        raise ValueError("Train split DataLoader is None. Check --splits and features_root.")
+    sample0 = train_loader.dataset[0]
+    inferred_v_dim = int(sample0['visual'].shape[-1])
+    inferred_a_dim = int(sample0['audio'].shape[-1])
+    if rank == 0:
+        print(f"[INFO] Inferred dims: v_dim={inferred_v_dim}, a_dim={inferred_a_dim}")
+
     # Auto pos_weight
     if args.pos_weight < 0:
         args.pos_weight = dataloaders.get('pos_weight', 1.0)
@@ -377,8 +387,8 @@ def main():
         print(f"\n[INFO] Creating model...")
     
     model = FrameLocalizationModel(
-        v_dim=512,
-        a_dim=1024,
+        v_dim=inferred_v_dim,
+        a_dim=inferred_a_dim,
         d_model=args.d_model,
         nhead=args.nhead,
         num_layers=args.num_layers,
