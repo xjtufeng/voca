@@ -160,6 +160,14 @@ def evaluate(
 ) -> Dict[str, float]:
     """Evaluate on validation/test set"""
     model.eval()
+
+    # Handle empty loader/dataset gracefully
+    try:
+        if loader is None or len(loader) == 0:  # type: ignore[arg-type]
+            return {}
+    except TypeError:
+        # Some DataLoader implementations may not support len(); proceed.
+        pass
     
     total_loss = 0
     all_frame_probs = []
@@ -207,6 +215,10 @@ def evaluate(
             all_video_probs.extend(video_probs)
             all_video_labels.extend(video_labels.cpu().numpy())
     
+    # No samples collected (e.g., empty split)
+    if len(all_frame_probs) == 0:
+        return {}
+
     # Concatenate all predictions
     all_frame_probs = np.concatenate(all_frame_probs)
     all_frame_labels = np.concatenate(all_frame_labels)
@@ -365,6 +377,30 @@ def main():
     
     train_loader = dataloaders.get('train')
     val_loader = dataloaders.get('dev') or dataloaders.get('test')
+
+    # If dev split exists but is empty, fall back to test; otherwise skip evaluation.
+    if val_loader is not None:
+        try:
+            val_len = len(val_loader.dataset)  # type: ignore[attr-defined]
+        except Exception:
+            val_len = None
+
+        if val_len == 0:
+            test_loader = dataloaders.get('test')
+            test_len = None
+            if test_loader is not None:
+                try:
+                    test_len = len(test_loader.dataset)  # type: ignore[attr-defined]
+                except Exception:
+                    test_len = None
+
+            if rank == 0:
+                print("[WARN] Validation split is empty. Falling back to test split for evaluation.")
+
+            if test_loader is not None and test_len != 0:
+                val_loader = test_loader
+            else:
+                val_loader = None
     
     # Infer feature dimensions from dataset to avoid hardcoding.
     # LAV-DF audio embeddings can be 512-d (motion latent) or 1024-d depending on extraction.
