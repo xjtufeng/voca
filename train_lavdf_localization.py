@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torch.cuda.amp import autocast, GradScaler
+from torch.cuda.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 
@@ -30,6 +30,21 @@ from model_localization import (
     compute_temporal_smoothness_loss,
     compute_combined_loss
 )
+
+
+def _autocast_ctx(device: torch.device):
+    """
+    Version-safe autocast context.
+    - Newer PyTorch: torch.amp.autocast(device_type='cuda', enabled=...)
+    - Older PyTorch: torch.cuda.amp.autocast(enabled=...)
+    """
+    enabled = (device.type == "cuda")
+    # Prefer torch.amp.autocast if available (PyTorch 2.x)
+    if hasattr(torch, "amp") and hasattr(torch.amp, "autocast"):
+        return torch.amp.autocast(device_type="cuda", enabled=enabled)
+    # Fallback
+    from torch.cuda.amp import autocast  # type: ignore
+    return autocast(enabled=enabled)
 
 
 def setup_ddp():
@@ -86,8 +101,8 @@ def train_epoch(
         
         optimizer.zero_grad()
         
-        # Forward pass with AMP
-        with autocast('cuda'):
+        # Forward pass with AMP (version-safe)
+        with _autocast_ctx(device):
             frame_logits, video_logit, frame_similarity = model(visual, audio, mask)
             
             # Compute losses using combined loss function
@@ -459,7 +474,7 @@ def main():
     scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     
     # AMP scaler
-    scaler = GradScaler('cuda')
+    scaler = GradScaler(enabled=(device.type == "cuda"))
     
     # Resume from checkpoint
     start_epoch = 0
