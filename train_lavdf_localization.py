@@ -387,7 +387,10 @@ def main():
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         max_frames=args.max_frames,
-        stride=args.stride
+        stride=args.stride,
+        distributed=(world_size > 1),
+        rank=rank,
+        world_size=world_size,
     )
     
     train_loader = dataloaders.get('train')
@@ -454,7 +457,8 @@ def main():
     
     # Wrap with DDP
     if world_size > 1:
-        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
+        # find_unused_parameters adds overhead and can worsen performance/stability.
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=False)
     
     # Optimizer and scheduler
     optimizer = optim.AdamW(
@@ -502,6 +506,11 @@ def main():
         print(f"[INFO] Training for {args.epochs} epochs")
     
     for epoch in range(start_epoch, args.epochs):
+        # Ensure each rank uses a different shard each epoch when using DistributedSampler
+        train_sampler = dataloaders.get('train_sampler')
+        if train_sampler is not None and hasattr(train_sampler, 'set_epoch'):
+            train_sampler.set_epoch(epoch)
+
         # Train
         train_metrics = train_epoch(
             model, train_loader, optimizer, scaler, device, epoch, args, rank

@@ -6,6 +6,7 @@ Loads video features with frame-level labels for temporal deepfake localization
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from pathlib import Path
 from typing import List, Dict, Tuple
 import json
@@ -232,6 +233,9 @@ def get_dataloaders(
     batch_size: int = 8,
     num_workers: int = 4,
     max_frames: int = 512,
+    distributed: bool = False,
+    rank: int = 0,
+    world_size: int = 1,
     **kwargs
 ) -> Dict[str, DataLoader]:
     """
@@ -256,18 +260,32 @@ def get_dataloaders(
             max_frames=max_frames,
             **kwargs
         )
-        
+
+        sampler = None
+        if distributed and world_size > 1:
+            sampler = DistributedSampler(
+                dataset,
+                num_replicas=world_size,
+                rank=rank,
+                shuffle=(split == 'train'),
+                drop_last=(split == 'train')
+            )
+
         dataloader = DataLoader(
             dataset,
             batch_size=batch_size,
-            shuffle=(split == 'train'),
+            shuffle=False if sampler is not None else (split == 'train'),
+            sampler=sampler,
             num_workers=num_workers,
             collate_fn=collate_variable_length,
             pin_memory=True,
-            drop_last=(split == 'train')
+            drop_last=(split == 'train'),
+            persistent_workers=(num_workers > 0),
         )
         
         dataloaders[split] = dataloader
+        if sampler is not None:
+            dataloaders[f"{split}_sampler"] = sampler
     
     # Return pos_weight from train dataset
     if 'train' in splits:
