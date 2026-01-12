@@ -55,7 +55,8 @@ class LAVDFLocalizationDataset(Dataset):
             raise FileNotFoundError(f"Split directory not found: {split_dir}")
         
         samples = []
-        for video_dir in split_dir.iterdir():
+        # Sort for determinism across ranks (important for DDP reproducibility)
+        for video_dir in sorted(split_dir.iterdir(), key=lambda p: p.name):
             if not video_dir.is_dir():
                 continue
             
@@ -65,16 +66,28 @@ class LAVDFLocalizationDataset(Dataset):
             if not (visual_file.exists() and audio_file.exists()):
                 continue
             
-            # Quick check: load frame count
+            # Quick check: validate BOTH npz files are readable and consistent enough to train.
+            # This prevents mid-epoch DataLoader crashes (which lead to DDP/NCCL hangs).
             try:
-                data = np.load(visual_file)
-                num_frames = len(data['embeddings'])
+                visual_data = np.load(visual_file)
+                if 'embeddings' not in visual_data.files:
+                    print(f"[WARN] Missing embeddings in {visual_file}, skipping")
+                    continue
+
+                num_frames = len(visual_data['embeddings'])
                 if num_frames < self.min_frames:
                     continue
                 
                 # Check if frame_labels exist
-                if 'frame_labels' not in data:
+                if 'frame_labels' not in visual_data.files:
                     print(f"[WARN] Missing frame_labels in {visual_file}, skipping")
+                    continue
+
+                # Validate audio file can be opened and has embeddings.
+                # We don't need to fully align here; just ensure it is readable (CRC ok).
+                audio_data = np.load(audio_file)
+                if 'embeddings' not in audio_data.files:
+                    print(f"[WARN] Missing embeddings in {audio_file}, skipping")
                     continue
                 
                 samples.append({

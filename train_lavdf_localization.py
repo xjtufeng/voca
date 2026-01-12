@@ -419,6 +419,11 @@ def main():
                 val_loader = test_loader
             else:
                 val_loader = None
+
+    # DDP safety: only run evaluation on rank0 to avoid per-rank DataLoader failures
+    # causing progress divergence (and subsequent NCCL/allreduce timeouts).
+    if world_size > 1 and rank != 0:
+        val_loader = None
     
     # Infer feature dimensions from dataset to avoid hardcoding.
     # LAV-DF audio embeddings can be 512-d (motion latent) or 1024-d depending on extraction.
@@ -515,12 +520,20 @@ def main():
         train_metrics = train_epoch(
             model, train_loader, optimizer, scaler, device, epoch, args, rank
         )
-        
-        # Evaluate
+
+        # Sync all ranks before evaluation so no rank starts the next epoch early.
+        if world_size > 1 and dist.is_initialized():
+            dist.barrier()
+
+        # Evaluate (rank0 only in DDP)
         if val_loader is not None:
             val_metrics = evaluate(model, val_loader, device, args, rank)
         else:
             val_metrics = {}
+
+        # Sync all ranks after evaluation as well.
+        if world_size > 1 and dist.is_initialized():
+            dist.barrier()
         
         # Step scheduler
         scheduler.step()
