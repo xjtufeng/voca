@@ -275,7 +275,9 @@ def get_dataloaders(
         )
 
         sampler = None
-        if distributed and world_size > 1:
+        # DDP: only shard TRAIN data. For eval splits, sharding is optional and can
+        # lead to partial metrics if only rank0 evaluates.
+        if distributed and world_size > 1 and split == 'train':
             sampler = DistributedSampler(
                 dataset,
                 num_replicas=world_size,
