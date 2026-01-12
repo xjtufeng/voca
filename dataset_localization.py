@@ -73,7 +73,9 @@ class LAVDFLocalizationDataset(Dataset):
                 if 'embeddings' not in visual_data.files:
                     print(f"[WARN] Missing embeddings in {visual_file}, skipping")
                     continue
-
+                
+                # Actually read visual embeddings to trigger CRC check (not just check key exists)
+                _ = visual_data['embeddings']
                 num_frames = len(visual_data['embeddings'])
                 if num_frames < self.min_frames:
                     continue
@@ -84,11 +86,14 @@ class LAVDFLocalizationDataset(Dataset):
                     continue
 
                 # Validate audio file can be opened and has embeddings.
-                # We don't need to fully align here; just ensure it is readable (CRC ok).
+                # Actually read to ensure CRC is valid (not just check key exists).
                 audio_data = np.load(audio_file)
                 if 'embeddings' not in audio_data.files:
                     print(f"[WARN] Missing embeddings in {audio_file}, skipping")
                     continue
+                
+                # Actually read audio embeddings to trigger CRC check
+                _ = audio_data['embeddings']
                 
                 samples.append({
                     'video_id': video_dir.name,
