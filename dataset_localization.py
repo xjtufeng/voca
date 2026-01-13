@@ -300,7 +300,8 @@ def get_dataloaders(
             collate_fn=collate_variable_length,
             pin_memory=True,
             drop_last=(split == 'train'),
-            persistent_workers=(num_workers > 0),
+            persistent_workers=False,  # Disable to avoid worker hangs on HDD
+            timeout=300 if num_workers > 0 else 0,  # 5min timeout for worker
         )
         
         dataloaders[split] = dataloader
