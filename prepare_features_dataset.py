@@ -47,9 +47,11 @@ def _slugify_path(path: Path) -> str:
 
 def find_videos(dataset_root: Path, video_list: Path | None = None) -> List[Tuple[Path, str, str]]:
     """
-    - 若提供 video_list（每行一个 mp4 路径），按列表读取；标签根据路径包含 real/fake 判断。
-    - 否则递归搜索 dataset_root/{real,fake}/**/*.mp4。
-    返回 (视频绝对路径, 标签, 唯一ID)。ID 由相对路径去后缀并用下划线连接，避免重名。
+    Find all videos under dataset_root.
+    
+    Supports two directory structures:
+    1. Standard: dataset_root/real/*.mp4, dataset_root/fake/*.mp4
+    2. Nested: recursively scan and infer label from path (contains "real" or "fake")
     """
     videos: List[Tuple[Path, str, str]] = []
     if video_list:
@@ -63,14 +65,37 @@ def find_videos(dataset_root: Path, video_list: Path | None = None) -> List[Tupl
                 videos.append((p, label, vid))
         return videos
 
-    for label in ["real", "fake"]:
-        label_dir = dataset_root / label
-        if not label_dir.exists():
-            continue
-        for mp4 in sorted(label_dir.rglob("*.mp4")):
-            rel = mp4.relative_to(label_dir)  # 不含 real/fake
+    # Check if standard structure exists (dataset_root/real and dataset_root/fake)
+    has_standard_structure = (dataset_root / "real").exists() or (dataset_root / "fake").exists()
+    
+    if has_standard_structure:
+        # Standard structure: scan real/ and fake/ subdirectories
+        for label in ["real", "fake"]:
+            label_dir = dataset_root / label
+            if not label_dir.exists():
+                continue
+            for mp4 in sorted(label_dir.rglob("*.mp4")):
+                rel = mp4.relative_to(label_dir)  # relative to label_dir
+                vid = _slugify_path(rel)
+                videos.append((mp4, label, vid))
+    else:
+        # Nested structure: recursively scan and infer label from path
+        for mp4 in sorted(dataset_root.rglob("*.mp4")):
+            path_str = str(mp4.relative_to(dataset_root)).lower()
+            
+            # Infer label: if path contains "real" but not "fake", it's real
+            if "real" in path_str and "fake" not in path_str:
+                label = "real"
+            elif "fake" in path_str:
+                label = "fake"
+            else:
+                # Default to fake if unclear (conservative for deepfake detection)
+                label = "fake"
+            
+            rel = mp4.relative_to(dataset_root)
             vid = _slugify_path(rel)
             videos.append((mp4, label, vid))
+    
     return videos
 
 
