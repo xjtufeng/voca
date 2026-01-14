@@ -138,14 +138,22 @@ class LAVDFLocalizationDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         sample = self.samples[idx]
         
-        # Load visual embeddings + frame_labels
-        visual_data = np.load(sample['visual_file'])
-        visual_emb = visual_data['embeddings']  # [T_v, 512]
-        frame_labels = visual_data['frame_labels']  # [T_v]
-        
-        # Load audio embeddings
-        audio_data = np.load(sample['audio_file'])
-        audio_emb = audio_data['embeddings']  # [T_a, 1024]
+        try:
+            # Load visual embeddings + frame_labels
+            visual_data = np.load(sample['visual_file'])
+            visual_emb = visual_data['embeddings']  # [T_v, 512]
+            frame_labels = visual_data['frame_labels']  # [T_v]
+            
+            # Load audio embeddings
+            audio_data = np.load(sample['audio_file'])
+            audio_emb = audio_data['embeddings']  # [T_a, 1024]
+        except Exception as e:
+            # Safety net: if loading fails (corrupted file, IO error, etc.),
+            # skip this sample and try the next one to avoid DDP hangs
+            print(f"[ERROR] Failed to load {sample['video_id']}: {e}, trying next sample")
+            # Return next sample (wrap around if at end)
+            next_idx = (idx + 1) % len(self.samples)
+            return self.__getitem__(next_idx)
         
         # Sample frames with stride
         if self.stride > 1:
