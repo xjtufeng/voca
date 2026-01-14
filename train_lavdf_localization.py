@@ -381,9 +381,24 @@ def main():
     if rank == 0:
         print(f"\n[INFO] Loading data from {args.features_root}")
     
+    # Support dev_temp (train-split dev) if it exists
+    actual_splits = []
+    for split in args.splits:
+        if split == 'dev':
+            # Check if dev_temp exists (train-split dev), use it instead
+            dev_temp_path = Path(args.features_root) / 'dev_temp'
+            if dev_temp_path.exists():
+                actual_splits.append('dev_temp')
+                if rank == 0:
+                    print(f"[INFO] Using dev_temp (train-split dev) instead of dev")
+            else:
+                actual_splits.append('dev')
+        else:
+            actual_splits.append(split)
+    
     dataloaders = get_dataloaders(
         features_root=args.features_root,
-        splits=args.splits,
+        splits=actual_splits,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         max_frames=args.max_frames,
@@ -392,6 +407,12 @@ def main():
         rank=rank,
         world_size=world_size,
     )
+    
+    # Remap dev_temp back to dev for consistency
+    if 'dev_temp' in dataloaders:
+        dataloaders['dev'] = dataloaders.pop('dev_temp')
+        if 'dev_temp_sampler' in dataloaders:
+            dataloaders['dev_sampler'] = dataloaders.pop('dev_temp_sampler')
     
     train_loader = dataloaders.get('train')
     val_loader = dataloaders.get('dev') or dataloaders.get('test')
