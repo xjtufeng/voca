@@ -486,13 +486,13 @@ def main():
                   f"VO: {train_metrics['visual_only']:.4f}")
             
             if val_metrics:
-                print(f"  Val   - Fused AUC: {val_metrics.get('fused_auc', 0):.4f}, "
-                      f"CM AUC: {val_metrics.get('cm_auc', 0):.4f}, "
-                      f"AO AUC: {val_metrics.get('ao_auc', 0):.4f}, "
-                      f"VO AUC: {val_metrics.get('vo_auc', 0):.4f}")
+                print(f"  Val   - Fused: AUC={val_metrics.get('fused_auc', 0):.4f}, ACC={val_metrics.get('fused_acc', 0):.4f}")
+                print(f"          CM: AUC={val_metrics.get('cm_auc', 0):.4f}, ACC={val_metrics.get('cm_acc', 0):.4f}")
+                print(f"          AO: AUC={val_metrics.get('ao_auc', 0):.4f}, ACC={val_metrics.get('ao_acc', 0):.4f}")
+                print(f"          VO: AUC={val_metrics.get('vo_auc', 0):.4f}, ACC={val_metrics.get('vo_acc', 0):.4f}")
                 
                 if 'fusion_weight_cm' in val_metrics:
-                    print(f"  Fusion Weights - CM: {val_metrics['fusion_weight_cm']:.3f}, "
+                    print(f"          Fusion Weights - CM: {val_metrics['fusion_weight_cm']:.3f}, "
                           f"AO: {val_metrics['fusion_weight_ao']:.3f}, "
                           f"VO: {val_metrics['fusion_weight_vo']:.3f}")
             
