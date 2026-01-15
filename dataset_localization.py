@@ -54,10 +54,23 @@ class LAVDFLocalizationDataset(Dataset):
         if not split_dir.exists():
             raise FileNotFoundError(f"Split directory not found: {split_dir}")
         
+        # If loading train split, check for dev_temp and exclude those samples
+        dev_temp_ids = set()
+        if self.split == 'train':
+            dev_temp_dir = self.features_root / 'dev_temp'
+            if dev_temp_dir.exists():
+                dev_temp_ids = {p.name for p in dev_temp_dir.iterdir() if p.is_symlink() or p.is_dir()}
+                if dev_temp_ids:
+                    print(f"[INFO] Found dev_temp with {len(dev_temp_ids)} samples, excluding from train")
+        
         samples = []
         # Sort for determinism across ranks (important for DDP reproducibility)
         for video_dir in sorted(split_dir.iterdir(), key=lambda p: p.name):
             if not video_dir.is_dir():
+                continue
+            
+            # Skip if this sample is in dev_temp (for train split)
+            if video_dir.name in dev_temp_ids:
                 continue
             
             visual_file = video_dir / "visual_embeddings.npz"
