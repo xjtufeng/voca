@@ -23,6 +23,7 @@ import numpy as np
 from sklearn.metrics import roc_auc_score, f1_score, precision_score, recall_score, average_precision_score
 
 from dataset_localization import get_dataloaders
+from evaluation.temporal_localization import evaluate_temporal_localization
 from model_localization import (
     FrameLocalizationModel,
     compute_frame_loss,
@@ -185,8 +186,9 @@ def evaluate(
         pass
     
     total_loss = 0
-    all_frame_probs = []
-    all_frame_labels = []
+    all_frame_probs = []  # List of arrays (one per video)
+    all_frame_labels = []  # List of arrays (one per video)
+    all_video_ids = []  # List of video IDs
     all_video_probs = []
     all_video_labels = []
     
@@ -201,6 +203,7 @@ def evaluate(
         frame_labels = batch['frame_labels'].to(device)
         video_labels = batch['video_labels'].to(device)
         mask = batch['mask'].to(device)
+        video_ids = batch['video_ids']
         
         # Forward pass
         frame_logits, video_logit, frame_similarity = model(visual, audio, mask)
@@ -221,8 +224,10 @@ def evaluate(
             valid_probs = frame_probs[i][valid_mask].cpu().numpy()
             valid_labels = frame_labels[i][valid_mask].cpu().numpy()
             
+            # Store per-video (for temporal localization evaluation)
             all_frame_probs.append(valid_probs)
             all_frame_labels.append(valid_labels)
+            all_video_ids.append(video_ids[i])
         
         # Video-level predictions
         if video_logit is not None:
@@ -234,18 +239,16 @@ def evaluate(
     if len(all_frame_probs) == 0:
         return {}
 
-    # Concatenate all predictions
-    all_frame_probs = np.concatenate(all_frame_probs)
-    all_frame_labels = np.concatenate(all_frame_labels)
+    # Compute frame-level metrics (flatten for traditional metrics)
+    all_frame_probs_flat = np.concatenate(all_frame_probs)
+    all_frame_labels_flat = np.concatenate(all_frame_labels)
+    frame_preds_binary = (all_frame_probs_flat > 0.5).astype(int)
     
-    # Compute frame-level metrics
-    frame_preds_binary = (all_frame_probs > 0.5).astype(int)
-    
-    frame_auc = roc_auc_score(all_frame_labels, all_frame_probs)
-    frame_ap = average_precision_score(all_frame_labels, all_frame_probs)
-    frame_f1 = f1_score(all_frame_labels, frame_preds_binary)
-    frame_precision = precision_score(all_frame_labels, frame_preds_binary, zero_division=0)
-    frame_recall = recall_score(all_frame_labels, frame_preds_binary, zero_division=0)
+    frame_auc = roc_auc_score(all_frame_labels_flat, all_frame_probs_flat)
+    frame_ap = average_precision_score(all_frame_labels_flat, all_frame_probs_flat)
+    frame_f1 = f1_score(all_frame_labels_flat, frame_preds_binary)
+    frame_precision = precision_score(all_frame_labels_flat, frame_preds_binary, zero_division=0)
+    frame_recall = recall_score(all_frame_labels_flat, frame_preds_binary, zero_division=0)
     
     metrics = {
         'loss': total_loss / len(loader),
@@ -255,6 +258,34 @@ def evaluate(
         'frame_precision': frame_precision,
         'frame_recall': frame_recall
     }
+    
+    # Temporal localization metrics (segment-level AP@IoU)
+    if rank == 0:  # Only compute on rank 0 to save time
+        try:
+            temporal_metrics = evaluate_temporal_localization(
+                all_frame_probs,
+                all_frame_labels,
+                video_ids=all_video_ids,
+                thresholds=[0.1, 0.2, 0.3, 0.4, 0.5],
+                iou_thresholds=[0.5, 0.75, 0.95],
+                nms_iou=0.7,
+                min_length=3,
+                merge_gap=2,
+                use_best_threshold=True
+            )
+            
+            # Add to metrics
+            metrics['AP@0.5'] = temporal_metrics['AP@0.5']
+            metrics['AP@0.75'] = temporal_metrics['AP@0.75']
+            metrics['AP@0.95'] = temporal_metrics['AP@0.95']
+            metrics['mAP'] = temporal_metrics['mAP']
+            metrics['best_threshold'] = temporal_metrics['best_threshold']
+        except Exception as e:
+            print(f"[WARN] Temporal localization evaluation failed: {e}")
+            metrics['AP@0.5'] = 0.0
+            metrics['AP@0.75'] = 0.0
+            metrics['AP@0.95'] = 0.0
+            metrics['mAP'] = 0.0
     
     # Video-level metrics (if available)
     if len(all_video_probs) > 0:
@@ -580,6 +611,13 @@ def main():
                     print(f"          Video AUC: {val_metrics['video_auc']:.4f}, "
                           f"AP: {val_metrics['video_ap']:.4f}, "
                           f"F1: {val_metrics['video_f1']:.4f}")
+                
+                if 'mAP' in val_metrics:
+                    print(f"          Temporal: mAP={val_metrics['mAP']:.4f}, "
+                          f"AP@0.5={val_metrics['AP@0.5']:.4f}, "
+                          f"AP@0.75={val_metrics['AP@0.75']:.4f}, "
+                          f"AP@0.95={val_metrics['AP@0.95']:.4f} "
+                          f"(threshold={val_metrics.get('best_threshold', 0.3):.2f})")
             
             # Save checkpoint
             if (epoch + 1) % args.save_every == 0:
