@@ -20,7 +20,7 @@ import torch.distributed as dist
 
 from tqdm import tqdm
 import numpy as np
-from sklearn.metrics import roc_auc_score, f1_score, precision_score, recall_score
+from sklearn.metrics import roc_auc_score, f1_score, precision_score, recall_score, average_precision_score
 
 from dataset_localization import get_dataloaders
 from model_localization import (
@@ -242,6 +242,7 @@ def evaluate(
     frame_preds_binary = (all_frame_probs > 0.5).astype(int)
     
     frame_auc = roc_auc_score(all_frame_labels, all_frame_probs)
+    frame_ap = average_precision_score(all_frame_labels, all_frame_probs)
     frame_f1 = f1_score(all_frame_labels, frame_preds_binary)
     frame_precision = precision_score(all_frame_labels, frame_preds_binary, zero_division=0)
     frame_recall = recall_score(all_frame_labels, frame_preds_binary, zero_division=0)
@@ -249,6 +250,7 @@ def evaluate(
     metrics = {
         'loss': total_loss / len(loader),
         'frame_auc': frame_auc,
+        'frame_ap': frame_ap,
         'frame_f1': frame_f1,
         'frame_precision': frame_precision,
         'frame_recall': frame_recall
@@ -261,9 +263,11 @@ def evaluate(
         video_preds_binary = (all_video_probs > 0.5).astype(int)
         
         video_auc = roc_auc_score(all_video_labels, all_video_probs)
+        video_ap = average_precision_score(all_video_labels, all_video_probs)
         video_f1 = f1_score(all_video_labels, video_preds_binary)
         
         metrics['video_auc'] = video_auc
+        metrics['video_ap'] = video_ap
         metrics['video_f1'] = video_f1
     
     return metrics
@@ -569,11 +573,13 @@ def main():
             if val_metrics:
                 print(f"  Val   - Loss: {val_metrics['loss']:.4f}, "
                       f"Frame AUC: {val_metrics['frame_auc']:.4f}, "
-                      f"Frame F1: {val_metrics['frame_f1']:.4f}")
+                      f"AP: {val_metrics['frame_ap']:.4f}, "
+                      f"F1: {val_metrics['frame_f1']:.4f}")
                 
                 if 'video_auc' in val_metrics:
                     print(f"          Video AUC: {val_metrics['video_auc']:.4f}, "
-                          f"Video F1: {val_metrics['video_f1']:.4f}")
+                          f"AP: {val_metrics['video_ap']:.4f}, "
+                          f"F1: {val_metrics['video_f1']:.4f}")
             
             # Save checkpoint
             if (epoch + 1) % args.save_every == 0:
