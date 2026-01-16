@@ -60,7 +60,7 @@ def train_epoch(
                 return_branch_outputs=False
             )
             
-            fused_logits = outputs['fused']  # [B, 4]
+            fused_logits = outputs['fused_logit']  # [B, 4]
             
             # Cross-entropy loss for 4-class classification
             loss = nn.CrossEntropyLoss()(fused_logits, labels)
@@ -113,7 +113,7 @@ def evaluate(
             return_branch_outputs=False
         )
         
-        fused_logits = outputs['fused']
+        fused_logits = outputs['fused_logit']
         probs = torch.softmax(fused_logits, dim=1)  # [B, 4]
         
         all_probs.append(probs.cpu().numpy())
@@ -175,8 +175,8 @@ def train_one_fold(fold_id: int, args) -> Dict[str, float]:
     
     # Create model (4-class output)
     model = ThreeBranchJointModel(
-        audio_dim=args.audio_dim,
-        visual_dim=args.visual_dim,
+        a_dim=args.audio_dim,  # FakeAVCeleb uses 512-dim audio
+        v_dim=args.visual_dim,  # FakeAVCeleb uses 512-dim visual
         d_model=args.d_model,
         cm_layers=args.cm_layers,
         ao_layers=args.ao_layers,
@@ -185,7 +185,7 @@ def train_one_fold(fold_id: int, args) -> Dict[str, float]:
         dropout=args.dropout,
         num_classes=4,  # IMPORTANT: 4-class
         fusion_method=args.fusion_method,
-        use_clip=False
+        use_dfdfcg=False
     ).to(device)
     
     # Optimizer

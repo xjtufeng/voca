@@ -319,6 +319,7 @@ class ThreeBranchJointModel(nn.Module):
         ao_layers: int = 3,
         vo_layers: int = 3,
         dropout: float = 0.1,
+        num_classes: int = 2,  # Number of output classes (2 for binary, 4 for FakeAV)
         fusion_method: str = 'concat',  # 'concat', 'weighted', 'attention'
         use_dfdfcg: bool = False,
         dfdfcg_pretrain: str = None,
@@ -364,6 +365,8 @@ class ThreeBranchJointModel(nn.Module):
         )
         
         # Fusion module
+        self.num_classes = num_classes
+        
         if fusion_method == 'concat':
             # Simple concatenation + MLP
             self.fusion_layer = nn.Sequential(
@@ -371,19 +374,19 @@ class ThreeBranchJointModel(nn.Module):
                 nn.LayerNorm(d_model),
                 nn.GELU(),
                 nn.Dropout(dropout),
-                nn.Linear(d_model, 1)
+                nn.Linear(d_model, num_classes)  # Support multi-class
             )
         
         elif fusion_method == 'weighted':
             # Learnable weighted sum
             self.branch_weights = nn.Parameter(torch.ones(3) / 3)
-            self.fusion_layer = nn.Linear(d_model, 1)
+            self.fusion_layer = nn.Linear(d_model, num_classes)  # Support multi-class
         
         elif fusion_method == 'attention':
             # Attention-based fusion
             self.attn_query = nn.Parameter(torch.randn(1, 1, d_model))
             self.attn_layer = nn.MultiheadAttention(d_model, nhead, batch_first=True)
-            self.fusion_layer = nn.Linear(d_model, 1)
+            self.fusion_layer = nn.Linear(d_model, num_classes)  # Support multi-class
     
     def forward(
         self,
