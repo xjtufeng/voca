@@ -39,3 +39,4 @@ python train_three_branch.py \
 echo ""
 echo "Quick test completed!"
 
+

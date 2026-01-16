@@ -67,6 +67,11 @@ def main():
     parser.add_argument('--output_dir', type=str, default='results/localization_test',
                         help='Directory to save evaluation results')
     
+    # Threshold control (to avoid data leakage on test set)
+    parser.add_argument('--fixed_threshold', type=float, default=None,
+                        help='Use fixed threshold for temporal localization (recommended for test). '
+                             'If not provided, will sweep thresholds to find best (use for val only).')
+    
     args = parser.parse_args()
     
     # Create output directory
@@ -138,9 +143,13 @@ def main():
     
     # Evaluate
     print(f'[INFO] Evaluating on {args.split} set...')
+    if args.fixed_threshold is not None:
+        print(f'[INFO] Using fixed threshold: {args.fixed_threshold:.2f} (no threshold sweep)')
+    else:
+        print(f'[WARNING] No fixed threshold specified - will sweep thresholds (use --fixed_threshold for test set!)')
     print()
     
-    test_metrics = evaluate(model, test_loader, device, args, rank=0)
+    test_metrics = evaluate(model, test_loader, device, args, rank=0, fixed_threshold=args.fixed_threshold)
     
     # Print results
     print()

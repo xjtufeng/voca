@@ -172,9 +172,15 @@ def evaluate(
     loader: DataLoader,
     device: torch.device,
     args: argparse.Namespace,
-    rank: int = 0
+    rank: int = 0,
+    fixed_threshold: float = None  # If provided, use this threshold instead of sweeping (for test)
 ) -> Dict[str, float]:
-    """Evaluate on validation/test set"""
+    """Evaluate on validation/test set
+    
+    Args:
+        fixed_threshold: If provided, use this threshold for temporal localization
+                        instead of sweeping (use for test set to avoid data leakage)
+    """
     model.eval()
 
     # Handle empty loader/dataset gracefully
@@ -262,16 +268,26 @@ def evaluate(
     # Temporal localization metrics (segment-level AP@IoU)
     if rank == 0:  # Only compute on rank 0 to save time
         try:
+            # Decide whether to sweep thresholds or use a fixed one
+            if fixed_threshold is not None:
+                # Test mode: use fixed threshold (no data leakage)
+                thresholds = [fixed_threshold]
+                use_best = False
+            else:
+                # Val mode: sweep thresholds to find best
+                thresholds = [0.1, 0.2, 0.3, 0.4, 0.5]
+                use_best = True
+            
             temporal_metrics = evaluate_temporal_localization(
                 all_frame_probs,
                 all_frame_labels,
                 video_ids=all_video_ids,
-                thresholds=[0.1, 0.2, 0.3, 0.4, 0.5],
+                thresholds=thresholds,
                 iou_thresholds=[0.5, 0.75, 0.95],
                 nms_iou=0.7,
                 min_length=3,
                 merge_gap=2,
-                use_best_threshold=True
+                use_best_threshold=use_best
             )
             
             # Add to metrics
@@ -279,7 +295,10 @@ def evaluate(
             metrics['AP@0.75'] = temporal_metrics['AP@0.75']
             metrics['AP@0.95'] = temporal_metrics['AP@0.95']
             metrics['mAP'] = temporal_metrics['mAP']
-            metrics['best_threshold'] = temporal_metrics['best_threshold']
+            if 'best_threshold' in temporal_metrics:
+                metrics['best_threshold'] = temporal_metrics['best_threshold']
+            else:
+                metrics['used_threshold'] = fixed_threshold  # Record which fixed threshold was used
         except Exception as e:
             print(f"[WARN] Temporal localization evaluation failed: {e}")
             metrics['AP@0.5'] = 0.0

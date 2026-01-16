@@ -35,10 +35,3 @@ external/
 # Notebooks
 *.ipynb
 
-# External repositories
-DFD-FCG/
-
-# Checkpoints and logs
-checkpoints/
-logs/
-
