@@ -131,7 +131,7 @@ def main():
     )
     
     # Load weights
-    model.load_state_dict(ckpt['model'])
+    model.load_state_dict(ckpt['model_state_dict'])
     model = model.to(device)
     print(f'✅ Model loaded on {device}')
     print()
