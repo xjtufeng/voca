@@ -389,8 +389,8 @@ def main():
     # Checkpointing
     parser.add_argument('--output_dir', type=str, default='./checkpoints/localization',
                         help='Output directory for checkpoints')
-    parser.add_argument('--save_every', type=int, default=5,
-                        help='Save checkpoint every N epochs')
+    parser.add_argument('--save_every', type=int, default=1,
+                        help='Save checkpoint every N epochs (default: 1, save all epochs)')
     parser.add_argument('--resume', type=str, default=None,
                         help='Resume from checkpoint')
     
