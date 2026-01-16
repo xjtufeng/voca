@@ -110,11 +110,18 @@ def main():
     print(f'[INFO] {args.split.capitalize()} set: {len(test_loader.dataset)} samples')
     print()
     
+    # Infer feature dimensions from data
+    sample0 = test_loader.dataset[0]
+    inferred_v_dim = int(sample0['visual'].shape[-1])
+    inferred_a_dim = int(sample0['audio'].shape[-1])
+    print(f'[INFO] Inferred feature dims: v_dim={inferred_v_dim}, a_dim={inferred_a_dim}')
+    print()
+    
     # Load model
     print('[INFO] Building model...')
     model = FrameLocalizationModel(
-        visual_dim=512,  # Fixed by feature extraction
-        audio_dim=512,   # Fixed by feature extraction
+        v_dim=inferred_v_dim,
+        a_dim=inferred_a_dim,
         d_model=args.d_model,
         nhead=args.nhead,
         num_layers=args.num_layers,
