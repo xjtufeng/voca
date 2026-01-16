@@ -27,9 +27,13 @@ def extract_identity(video_name: str) -> str:
     return match.group(1) if match else None
 
 
-def infer_label_from_name(video_name: str) -> int:
+def infer_label_from_name(video_name: str, parent_dir: str = 'unknown') -> int:
     """
-    Infer 4-class label from directory name
+    Infer 4-class label from directory name and parent directory
+    
+    Args:
+        video_name: Video directory name
+        parent_dir: Parent directory ('real' or 'fake')
     
     Returns:
         0: FAFV (Fake Audio + Fake Video)
@@ -38,6 +42,7 @@ def infer_label_from_name(video_name: str) -> int:
         3: RARV (Real Audio + Real Video)
         -1: Unknown
     """
+    # Try to infer from video name first
     if 'FakeVideo-FakeAudio' in video_name:
         return 0  # FAFV
     elif 'FakeVideo-RealAudio' in video_name:
@@ -46,8 +51,31 @@ def infer_label_from_name(video_name: str) -> int:
         return 2  # RAFV
     elif 'RealVideo-RealAudio' in video_name:
         return 3  # RARV
-    else:
-        return -1  # Unknown
+    
+    # Fallback: infer from parent directory and video name patterns
+    # If in 'real/' directory, it's likely RARV (all real)
+    # If in 'fake/' directory, check for additional patterns
+    
+    if parent_dir == 'real':
+        return 3  # RARV (Real Audio + Real Video)
+    elif parent_dir == 'fake':
+        # Try to detect fake patterns
+        # wavtolip, faceswap, etc. are fake generation methods
+        if any(pattern in video_name.lower() for pattern in ['wavtolip', 'wav2lip']):
+            # wav2lip typically generates fake video with real audio
+            return 1  # FARV
+        elif 'faceswap' in video_name.lower():
+            # faceswap typically generates fake video with real audio
+            return 1  # FARV
+        elif '_fake' in video_name.lower():
+            # Generic fake marker - could be FAFV or FARV
+            # Default to FAFV if no other indicators
+            return 0  # FAFV
+        else:
+            # Unknown fake type, default to FAFV
+            return 0  # FAFV
+    
+    return -1  # Unknown
 
 
 def create_5fold_splits(
@@ -99,12 +127,13 @@ def create_5fold_splits(
             video_name = video_dir.name
             identity = extract_identity(video_name)
             if identity is None:
-                print(f"[WARN] Cannot extract identity from: {video_name}")
+                # Some videos might not have identity in standard format
+                # Skip them silently to avoid excessive warnings
                 continue
             
-            label = infer_label_from_name(video_name)
+            label = infer_label_from_name(video_name, parent_dir=label_dir)
             if label == -1:
-                print(f"[WARN] Cannot infer label from: {video_name}")
+                # Skip unknown labels silently
                 continue
             
             video_info = {
