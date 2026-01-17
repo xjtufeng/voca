@@ -315,8 +315,9 @@ def evaluate_segment_level(
         # Sort predictions by score
         pred_segments_sorted = sorted(pred_segments, key=lambda x: x[2], reverse=True)
         
-        tp = np.zeros(len(pred_segments_sorted))
-        fp = np.zeros(len(pred_segments_sorted))
+        # Use float64 to prevent overflow
+        tp = np.zeros(len(pred_segments_sorted), dtype=np.float64)
+        fp = np.zeros(len(pred_segments_sorted), dtype=np.float64)
         
         matched_gt = set()
         
@@ -339,25 +340,31 @@ def evaluate_segment_level(
             else:
                 fp[i] = 1
         
-        # Compute precision and recall at each rank
-        tp_cumsum = np.cumsum(tp)
-        fp_cumsum = np.cumsum(fp)
+        # Compute precision and recall at each rank (use float64)
+        tp_cumsum = np.cumsum(tp, dtype=np.float64)
+        fp_cumsum = np.cumsum(fp, dtype=np.float64)
         
-        recalls = tp_cumsum / len(gt_segments)
-        precisions = tp_cumsum / (tp_cumsum + fp_cumsum + 1e-10)
+        recalls = tp_cumsum / max(len(gt_segments), 1)
+        precisions = tp_cumsum / np.maximum(tp_cumsum + fp_cumsum, 1e-10)
         
-        # Compute AP (area under precision-recall curve)
-        ap = 0.0
-        for i in range(len(precisions)):
-            if i == 0:
-                ap += precisions[i] * recalls[i]
-            else:
-                ap += precisions[i] * (recalls[i] - recalls[i-1])
+        # Compute AP using trapezoidal rule (more stable)
+        if len(recalls) > 0:
+            # Sort by recall for proper AP calculation
+            recall_indices = np.argsort(recalls)
+            sorted_recalls = recalls[recall_indices]
+            sorted_precisions = precisions[recall_indices]
+            
+            # Compute AP as area under P-R curve
+            ap = np.trapz(sorted_precisions, sorted_recalls)
+            ap = float(np.clip(ap, 0.0, 1.0))  # Clip to [0, 1] and convert to Python float
+        else:
+            ap = 0.0
         
         metrics[f'AP@{iou_thr:.1f}'] = ap
     
-    # Compute mAP
-    metrics['mAP'] = np.mean([metrics[k] for k in metrics.keys()])
+    # Compute mAP (use Python float to avoid numpy overflow)
+    ap_values = [float(metrics[k]) for k in metrics.keys() if k.startswith('AP@')]
+    metrics['mAP'] = float(np.mean(ap_values)) if len(ap_values) > 0 else 0.0
     
     return metrics
 
