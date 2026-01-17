@@ -443,7 +443,7 @@ def main():
             json.dump(vars(args), f, indent=2)
     
     # Create dataloaders
-    train_loader, val_loader = get_dataloaders(
+    loaders = get_dataloaders(
         features_root=args.features_root,
         splits=args.splits.split(','),
         batch_size=args.batch_size,
@@ -452,6 +452,10 @@ def main():
         event_centric_prob=args.event_centric_prob,
         distributed=(world_size > 1)
     )
+    
+    # Extract train and dev loaders
+    train_loader = loaders.get('train')
+    val_loader = loaders.get('dev')
     
     # Create enhanced model
     model = FrameLocalizationModel(
