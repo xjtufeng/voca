@@ -204,9 +204,14 @@ def evaluate(
     loader: DataLoader,
     device: torch.device,
     args: argparse.Namespace,
-    rank: int = 0
+    rank: int = 0,
+    do_segment_eval: bool = True
 ) -> Dict[str, float]:
-    """Evaluate on validation set"""
+    """Evaluate on validation set
+    
+    Args:
+        do_segment_eval: If False, skip expensive segment-level evaluation
+    """
     model.eval()
     
     try:
@@ -224,19 +229,19 @@ def evaluate(
     all_inconsistency_scores = []
     all_gate_values = []
     
-    # Boundary predictions for two-stage inference
-    all_start_probs = []
-    all_end_probs = []
-    
-    # Segment-level evaluation (full dev set)
-    all_pred_segments = []
-    all_gt_segments = []
+    # Segment-level evaluation (only if requested)
+    segment_metrics_list = []
     
     if rank == 0:
         pbar = tqdm(loader, desc="Evaluating")
     else:
         pbar = loader
     
+    max_eval_videos = int(getattr(args, "eval_max_videos", 0) or 0)
+    eval_stride = max(1, int(getattr(args, "eval_stride", 1) or 1))
+    videos_seen = 0
+    stop_eval = False
+
     for batch in pbar:
         visual = batch['visual'].to(device)
         audio = batch['audio'].to(device)
@@ -270,20 +275,29 @@ def evaluate(
         for i in range(frame_probs.size(0)):
             valid_mask = ~mask[i]
             if valid_mask.sum() > 0:
+                if max_eval_videos > 0 and videos_seen >= max_eval_videos:
+                    stop_eval = True
+                    break
                 # Frame-level
                 frame_probs_i = frame_probs[i][valid_mask].cpu().numpy()
                 frame_labels_i = frame_labels[i][valid_mask].cpu().numpy()
+                if eval_stride > 1:
+                    frame_probs_i = frame_probs_i[::eval_stride]
+                    frame_labels_i = frame_labels_i[::eval_stride]
                 all_frame_probs.append(frame_probs_i)
                 all_frame_labels.append(frame_labels_i)
-                all_inconsistency_scores.append(inconsistency_score[i][valid_mask].squeeze(-1).cpu().numpy())
-                all_gate_values.append(reliability_gate[i][valid_mask].squeeze(-1).cpu().numpy())
+                inc_i = inconsistency_score[i][valid_mask].squeeze(-1).cpu().numpy()
+                gate_i = reliability_gate[i][valid_mask].squeeze(-1).cpu().numpy()
+                if eval_stride > 1:
+                    inc_i = inc_i[::eval_stride]
+                    gate_i = gate_i[::eval_stride]
+                all_inconsistency_scores.append(np.nan_to_num(inc_i, nan=0.0, posinf=1e6, neginf=-1e6))
+                all_gate_values.append(np.nan_to_num(gate_i, nan=0.0, posinf=1.0, neginf=0.0))
                 
-                # Segment-level: Two-stage inference (full evaluation)
-                if start_probs is not None and end_probs is not None:
+                # Segment-level: Two-stage inference (only if requested)
+                if do_segment_eval and start_probs is not None and end_probs is not None:
                     start_probs_i = start_probs[i][valid_mask].cpu().numpy()
                     end_probs_i = end_probs[i][valid_mask].cpu().numpy()
-                    all_start_probs.append(start_probs_i)
-                    all_end_probs.append(end_probs_i)
                     
                     # Run two-stage localization
                     try:
@@ -293,17 +307,23 @@ def evaluate(
                             refine_delta=10,
                             min_len=5
                         )
-                        all_pred_segments.extend(pred_segments)
-                        
                         # Get GT segments
                         gt_segments = get_segments_from_binary((frame_labels_i == 1).astype(int))
-                        all_gt_segments.extend(gt_segments)
+                        if pred_segments or gt_segments:
+                            metrics_i = evaluate_segment_level(
+                                pred_segments, gt_segments,
+                                iou_thresholds=[0.3, 0.5, 0.7, 0.9]
+                            )
+                            segment_metrics_list.append(metrics_i)
                     except Exception as e:
                         # Skip if evaluation fails (avoid numpy overflow)
                         pass
+                videos_seen += 1
         
         all_video_probs.extend(video_probs.cpu().numpy())
         all_video_labels.extend(video_labels.cpu().numpy())
+        if stop_eval:
+            break
     
     # Compute frame-level metrics
     frame_probs_flat = np.concatenate(all_frame_probs)
@@ -337,18 +357,14 @@ def evaluate(
     gate_mean = gate_flat.mean()
     gate_std = gate_flat.std()
     
-    # Segment-level metrics (if boundary head is used)
+    # Segment-level metrics (per-video mean to avoid cross-video matching)
     segment_metrics = {}
-    if len(all_pred_segments) > 0 and len(all_gt_segments) > 0:
-        try:
-            segment_metrics = evaluate_segment_level(
-                all_pred_segments, all_gt_segments,
-                iou_thresholds=[0.3, 0.5, 0.7, 0.9]
-            )
-        except Exception as e:
-            if rank == 0:
-                print(f"Warning: Segment-level evaluation failed: {e}")
-            segment_metrics = {}
+    if len(segment_metrics_list) > 0:
+        keys = segment_metrics_list[0].keys()
+        segment_metrics = {
+            k: float(np.mean([m.get(k, 0.0) for m in segment_metrics_list]))
+            for k in keys
+        }
     
     return {
         'frame_auc': frame_auc,
@@ -420,6 +436,12 @@ def main():
     parser.add_argument('--weight_decay', type=float, default=1e-5)
     parser.add_argument('--warmup_epochs', type=int, default=5)
     parser.add_argument('--max_grad_norm', type=float, default=1.0)
+
+    # Evaluation controls
+    parser.add_argument('--eval_max_videos', type=int, default=0,
+                        help='Limit number of videos for validation (0 = no limit)')
+    parser.add_argument('--eval_stride', type=int, default=1,
+                        help='Downsample frames during validation metrics (1 = no downsample)')
     
     # Output
     parser.add_argument('--output_dir', type=str, default='./checkpoints/localization_v2')
@@ -555,7 +577,10 @@ def main():
         
         # Evaluate
         if val_loader is not None:
-            val_metrics = evaluate(model, val_loader, device, args, rank)
+            if rank == 0:
+                val_metrics = evaluate(model, val_loader, device, args, rank, do_segment_eval=True)
+            else:
+                val_metrics = {}
             
             if rank == 0 and val_metrics:
                 print(f"Val - Frame AUC: {val_metrics['frame_auc']:.4f}, "
@@ -564,9 +589,9 @@ def main():
                 
                 # Segment-level metrics (if boundary head is used)
                 if 'AP@0.5' in val_metrics:
-                    print(f"      Segment AP@0.5: {val_metrics['AP@0.5']:.4f}, "
-                          f"AP@0.75: {val_metrics['AP@0.75']:.4f}, "
-                          f"mAP: {val_metrics['mAP']:.4f}")
+                    print(f"      Segment AP@0.5: {val_metrics.get('AP@0.5', 0.0):.4f}, "
+                          f"AP@0.75: {val_metrics.get('AP@0.75', 0.0):.4f}, "
+                          f"mAP: {val_metrics.get('mAP', 0.0):.4f}")
                 
                 print(f"      Inc separation: {val_metrics['inc_separation']:.4f}, "
                       f"Gate: {val_metrics['gate_mean']:.3f}±{val_metrics['gate_std']:.3f}")
