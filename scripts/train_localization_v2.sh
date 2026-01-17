@@ -102,10 +102,10 @@ fi
 # Multi-GPU training with DDP
 if [ $NUM_GPUS -gt 1 ]; then
     echo "Using DDP with $NUM_GPUS GPUs"
-    torchrun --nproc_per_node=$NUM_GPUS $CMD
+    eval "torchrun --nproc_per_node=$NUM_GPUS $CMD"
 else
     echo "Using single GPU"
-    $CMD
+    eval "$CMD"
 fi
 
 echo ""
