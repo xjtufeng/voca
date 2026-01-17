@@ -291,8 +291,12 @@ def evaluate(
                 if eval_stride > 1:
                     inc_i = inc_i[::eval_stride]
                     gate_i = gate_i[::eval_stride]
-                all_inconsistency_scores.append(np.nan_to_num(inc_i, nan=0.0, posinf=1e6, neginf=-1e6))
-                all_gate_values.append(np.nan_to_num(gate_i, nan=0.0, posinf=1.0, neginf=0.0))
+                inc_i = np.nan_to_num(inc_i, nan=0.0, posinf=50.0, neginf=-50.0)
+                gate_i = np.nan_to_num(gate_i, nan=0.0, posinf=1.0, neginf=0.0)
+                inc_i = np.clip(inc_i, -50.0, 50.0)
+                gate_i = np.clip(gate_i, 0.0, 1.0)
+                all_inconsistency_scores.append(inc_i)
+                all_gate_values.append(gate_i)
                 
                 # Segment-level: Two-stage inference (only if requested)
                 if do_segment_eval and start_probs is not None and end_probs is not None:

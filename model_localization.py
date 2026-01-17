@@ -291,6 +291,8 @@ class FrameLocalizationModel(nn.Module):
         
         # Logit-level fusion: frame_logit = L_t + alpha * I_t / temperature
         if self.use_inconsistency_module and inconsistency_gated is not None:
+            # Clamp to avoid exploding logits from extreme inconsistency values
+            inconsistency_gated = torch.clamp(inconsistency_gated, -50.0, 50.0)
             frame_logits = frame_logits_main + self.alpha * (inconsistency_gated / self.temperature)
         else:
             frame_logits = frame_logits_main
