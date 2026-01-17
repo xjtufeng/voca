@@ -250,12 +250,16 @@ class FrameLocalizationModel(nn.Module):
         reliability_gate = None
         if self.use_reliability_gating:
             reliability_gate = self.reliability_gating(visual, audio)  # [B, T, 1]
+            reliability_gate = torch.nan_to_num(reliability_gate, nan=0.0, posinf=1.0, neginf=0.0)
+            reliability_gate = torch.clamp(reliability_gate, 0.0, 1.0)
         
         # Compute learned inconsistency score
         inconsistency_score = None
         inconsistency_gated = None
         if self.use_inconsistency_module:
             inconsistency_score = self.inconsistency_module(v, a)  # [B, T, 1]
+            inconsistency_score = torch.nan_to_num(inconsistency_score, nan=0.0, posinf=50.0, neginf=-50.0)
+            inconsistency_score = torch.clamp(inconsistency_score, -50.0, 50.0)
             
             # Apply reliability gating
             if reliability_gate is not None:
