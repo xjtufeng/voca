@@ -2,7 +2,7 @@
 # Enhanced LAV-DF Localization Training Script V2
 # Uses learned inconsistency, reliability gating, ranking loss, and hard negatives
 
-FEATURES_ROOT="/hpc2ssd/JH_DATA/spooler/xfeng733/lavdf_feats"
+FEATURES_ROOT="/hpc2ssd/JH_DATA/spooler/xfeng733/LAV-DF_feats"
 OUTPUT_DIR="./checkpoints/localization_v2"
 EPOCHS=100
 BATCH_SIZE=8

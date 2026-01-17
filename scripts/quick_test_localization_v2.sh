@@ -2,7 +2,7 @@
 # Quick test for enhanced localization training V2
 # Uses small subset for rapid iteration
 
-FEATURES_ROOT="/hpc2ssd/JH_DATA/spooler/xfeng733/lavdf_feats"
+FEATURES_ROOT="/hpc2ssd/JH_DATA/spooler/xfeng733/LAV-DF_feats"
 OUTPUT_DIR="./test_checkpoints/localization_v2_quick"
 
 echo "========================================"
