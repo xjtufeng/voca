@@ -19,6 +19,7 @@ python train_lavdf_localization_v2.py \
     --batch_size 4 \
     --num_workers 2 \
     --max_frames 256 \
+    --event_centric_prob 0.5 \
     --v_dim 512 \
     --a_dim 1024 \
     --d_model 256 \
@@ -27,13 +28,17 @@ python train_lavdf_localization_v2.py \
     --dropout 0.1 \
     --use_inconsistency_module \
     --use_reliability_gating \
+    --use_boundary_head \
+    --use_boundary_aware_smooth \
     --alpha_init 0.5 \
     --temperature 0.1 \
     --video_loss_weight 0.3 \
-    --smooth_loss_weight 0.1 \
+    --boundary_loss_weight 0.5 \
+    --smooth_loss_weight 0.05 \
     --ranking_loss_weight 0.5 \
     --fake_hinge_weight 0.05 \
     --ranking_margin 0.3 \
+    --boundary_tolerance 5 \
     --neg_shift_min 3 \
     --neg_shift_max 10 \
     --neg_swap_prob 0.5 \

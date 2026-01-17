@@ -32,6 +32,7 @@ from model_localization import (
     compute_combined_loss,
     generate_hard_negatives
 )
+from evaluation_boundary import two_stage_localization, evaluate_segment_level, get_segments_from_binary
 
 
 def _autocast_ctx(device: torch.device):
@@ -80,6 +81,7 @@ def train_epoch(
     total_loss = 0
     total_frame_loss = 0
     total_video_loss = 0
+    total_boundary_loss = 0
     total_smooth_loss = 0
     total_ranking_loss = 0
     total_fake_hinge_loss = 0
@@ -104,6 +106,8 @@ def train_epoch(
             outputs_pos = model(visual, audio, mask)
             frame_logits = outputs_pos['frame_logits']
             video_logit = outputs_pos['video_logit']
+            start_logits = outputs_pos['start_logits']
+            end_logits = outputs_pos['end_logits']
             inconsistency_pos = outputs_pos['inconsistency_score']
             inconsistency_gated = outputs_pos['inconsistency_gated']
             reliability_gate = outputs_pos['reliability_gate']
@@ -124,16 +128,21 @@ def train_epoch(
                 mask=mask,
                 video_logit=video_logit,
                 video_label=video_labels,
+                start_logits=start_logits,
+                end_logits=end_logits,
                 inconsistency_pos=inconsistency_pos,
                 inconsistency_neg=inconsistency_neg,
                 inconsistency_gated=inconsistency_gated,
                 reliability_gate=reliability_gate,
                 frame_loss_weight=1.0,
                 video_loss_weight=args.video_loss_weight,
+                boundary_loss_weight=args.boundary_loss_weight,
                 smooth_loss_weight=args.smooth_loss_weight,
                 ranking_loss_weight=args.ranking_loss_weight,
                 fake_hinge_weight=args.fake_hinge_weight,
+                boundary_tolerance=args.boundary_tolerance,
                 ranking_margin=args.ranking_margin,
+                use_boundary_aware_smooth=args.use_boundary_aware_smooth,
                 pos_weight=args.pos_weight if args.pos_weight > 0 else None,
                 use_focal=args.use_focal,
                 focal_alpha=args.focal_alpha,
@@ -143,6 +152,7 @@ def train_epoch(
             loss = losses['total']
             frame_loss = losses['frame']
             video_loss = losses['video']
+            boundary_loss = losses['boundary']
             smooth_loss = losses['smooth']
             ranking_loss = losses['ranking']
             fake_hinge_loss = losses['fake_hinge']
@@ -162,6 +172,7 @@ def train_epoch(
         total_loss += loss.item()
         total_frame_loss += frame_loss.item()
         total_video_loss += video_loss.item()
+        total_boundary_loss += boundary_loss.item()
         total_smooth_loss += smooth_loss.item()
         total_ranking_loss += ranking_loss.item()
         total_fake_hinge_loss += fake_hinge_loss.item()
@@ -171,7 +182,7 @@ def train_epoch(
             pbar.set_postfix({
                 'loss': f'{loss.item():.4f}',
                 'frame': f'{frame_loss.item():.4f}',
-                'rank': f'{ranking_loss.item():.4f}',
+                'bound': f'{boundary_loss.item():.4f}',
                 'alpha': f'{model.module.alpha.item() if hasattr(model, "module") else model.alpha.item():.3f}'
             })
     
@@ -180,6 +191,7 @@ def train_epoch(
         'loss': total_loss / num_batches,
         'frame_loss': total_frame_loss / num_batches,
         'video_loss': total_video_loss / num_batches,
+        'boundary_loss': total_boundary_loss / num_batches,
         'smooth_loss': total_smooth_loss / num_batches,
         'ranking_loss': total_ranking_loss / num_batches,
         'fake_hinge_loss': total_fake_hinge_loss / num_batches
@@ -212,6 +224,14 @@ def evaluate(
     all_inconsistency_scores = []
     all_gate_values = []
     
+    # Boundary predictions for two-stage inference
+    all_start_probs = []
+    all_end_probs = []
+    
+    # Segment-level evaluation
+    all_pred_segments = []
+    all_gt_segments = []
+    
     if rank == 0:
         pbar = tqdm(loader, desc="Evaluating")
     else:
@@ -228,11 +248,17 @@ def evaluate(
             outputs = model(visual, audio, mask)
             frame_logits = outputs['frame_logits']
             video_logit = outputs['video_logit']
+            start_logits = outputs.get('start_logits')
+            end_logits = outputs.get('end_logits')
             inconsistency_score = outputs['inconsistency_score']
             reliability_gate = outputs['reliability_gate']
         
         # Frame-level predictions
         frame_probs = torch.sigmoid(frame_logits.squeeze(-1))  # [B, T]
+        
+        # Boundary predictions
+        start_probs = torch.sigmoid(start_logits.squeeze(-1)) if start_logits is not None else None  # [B, T]
+        end_probs = torch.sigmoid(end_logits.squeeze(-1)) if end_logits is not None else None  # [B, T]
         
         # Video-level predictions
         if video_logit is not None:
@@ -240,14 +266,37 @@ def evaluate(
         else:
             video_probs = frame_probs.mean(dim=1)  # [B]
         
-        # Filter out padded frames
+        # Filter out padded frames and run two-stage inference
         for i in range(frame_probs.size(0)):
             valid_mask = ~mask[i]
             if valid_mask.sum() > 0:
-                all_frame_probs.append(frame_probs[i][valid_mask].cpu().numpy())
-                all_frame_labels.append(frame_labels[i][valid_mask].cpu().numpy())
+                # Frame-level
+                frame_probs_i = frame_probs[i][valid_mask].cpu().numpy()
+                frame_labels_i = frame_labels[i][valid_mask].cpu().numpy()
+                all_frame_probs.append(frame_probs_i)
+                all_frame_labels.append(frame_labels_i)
                 all_inconsistency_scores.append(inconsistency_score[i][valid_mask].squeeze(-1).cpu().numpy())
                 all_gate_values.append(reliability_gate[i][valid_mask].squeeze(-1).cpu().numpy())
+                
+                # Segment-level: Two-stage inference
+                if start_probs is not None and end_probs is not None:
+                    start_probs_i = start_probs[i][valid_mask].cpu().numpy()
+                    end_probs_i = end_probs[i][valid_mask].cpu().numpy()
+                    all_start_probs.append(start_probs_i)
+                    all_end_probs.append(end_probs_i)
+                    
+                    # Run two-stage localization
+                    pred_segments = two_stage_localization(
+                        frame_probs_i, start_probs_i, end_probs_i,
+                        thresholds=[0.3, 0.4, 0.5],
+                        refine_delta=10,
+                        min_len=5
+                    )
+                    all_pred_segments.extend(pred_segments)
+                    
+                    # Get GT segments
+                    gt_segments = get_segments_from_binary((frame_labels_i == 1).astype(int))
+                    all_gt_segments.extend(gt_segments)
         
         all_video_probs.extend(video_probs.cpu().numpy())
         all_video_labels.extend(video_labels.cpu().numpy())
@@ -284,6 +333,14 @@ def evaluate(
     gate_mean = gate_flat.mean()
     gate_std = gate_flat.std()
     
+    # Segment-level metrics (if boundary head is used)
+    segment_metrics = {}
+    if len(all_pred_segments) > 0 and len(all_gt_segments) > 0:
+        segment_metrics = evaluate_segment_level(
+            all_pred_segments, all_gt_segments,
+            iou_thresholds=[0.3, 0.5, 0.7, 0.9]
+        )
+    
     return {
         'frame_auc': frame_auc,
         'frame_ap': frame_ap,
@@ -296,7 +353,8 @@ def evaluate(
         'fake_inc_mean': fake_inc_mean,
         'inc_separation': inc_separation,
         'gate_mean': gate_mean,
-        'gate_std': gate_std
+        'gate_std': gate_std,
+        **segment_metrics
     }
 
 
@@ -309,6 +367,7 @@ def main():
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--max_frames', type=int, default=512)
+    parser.add_argument('--event_centric_prob', type=float, default=0.5)
     
     # Enhanced Model
     parser.add_argument('--v_dim', type=int, default=512)
@@ -316,20 +375,24 @@ def main():
     parser.add_argument('--d_model', type=int, default=512)
     parser.add_argument('--nhead', type=int, default=8)
     parser.add_argument('--num_layers', type=int, default=4)
-    parser.add_argument('--dropout', type=int, default=0.1)
+    parser.add_argument('--dropout', type=float, default=0.1)
     parser.add_argument('--use_cross_attn', action='store_true', default=True)
     parser.add_argument('--use_video_head', action='store_true', default=True)
     parser.add_argument('--use_inconsistency_module', action='store_true', default=True)
     parser.add_argument('--use_reliability_gating', action='store_true', default=True)
+    parser.add_argument('--use_boundary_head', action='store_true', default=True)
     parser.add_argument('--alpha_init', type=float, default=0.5)
     parser.add_argument('--temperature', type=float, default=0.1)
     
     # Loss weights
     parser.add_argument('--video_loss_weight', type=float, default=0.3)
-    parser.add_argument('--smooth_loss_weight', type=float, default=0.1)
+    parser.add_argument('--boundary_loss_weight', type=float, default=0.5)
+    parser.add_argument('--smooth_loss_weight', type=float, default=0.05)
     parser.add_argument('--ranking_loss_weight', type=float, default=0.5)
     parser.add_argument('--fake_hinge_weight', type=float, default=0.05)
     parser.add_argument('--ranking_margin', type=float, default=0.3)
+    parser.add_argument('--boundary_tolerance', type=int, default=5)
+    parser.add_argument('--use_boundary_aware_smooth', action='store_true', default=True)
     
     # Hard negatives
     parser.add_argument('--neg_shift_min', type=int, default=3)
@@ -386,6 +449,7 @@ def main():
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         max_frames=args.max_frames,
+        event_centric_prob=args.event_centric_prob,
         distributed=(world_size > 1)
     )
     
@@ -401,6 +465,7 @@ def main():
         use_video_head=args.use_video_head,
         use_inconsistency_module=args.use_inconsistency_module,
         use_reliability_gating=args.use_reliability_gating,
+        use_boundary_head=args.use_boundary_head,
         alpha_init=args.alpha_init,
         temperature=args.temperature
     ).to(device)
@@ -410,6 +475,8 @@ def main():
         print(f"Model parameters: {total_params:.2f}M")
         print(f"Inconsistency module: {args.use_inconsistency_module}")
         print(f"Reliability gating: {args.use_reliability_gating}")
+        print(f"Boundary head: {args.use_boundary_head}")
+        print(f"Event-centric sampling prob: {args.event_centric_prob}")
     
     # Wrap with DDP
     if world_size > 1:
@@ -470,8 +537,8 @@ def main():
         if rank == 0:
             print(f"Train - Loss: {train_metrics['loss']:.4f}, "
                   f"Frame: {train_metrics['frame_loss']:.4f}, "
-                  f"Ranking: {train_metrics['ranking_loss']:.4f}, "
-                  f"Hinge: {train_metrics['fake_hinge_loss']:.4f}")
+                  f"Boundary: {train_metrics['boundary_loss']:.4f}, "
+                  f"Ranking: {train_metrics['ranking_loss']:.4f}")
         
         # Evaluate
         if val_loader is not None:
@@ -481,6 +548,13 @@ def main():
                 print(f"Val - Frame AUC: {val_metrics['frame_auc']:.4f}, "
                       f"AP: {val_metrics['frame_ap']:.4f}, "
                       f"F1: {val_metrics['frame_f1']:.4f}")
+                
+                # Segment-level metrics (if boundary head is used)
+                if 'AP@0.5' in val_metrics:
+                    print(f"      Segment AP@0.5: {val_metrics['AP@0.5']:.4f}, "
+                          f"AP@0.75: {val_metrics['AP@0.75']:.4f}, "
+                          f"mAP: {val_metrics['mAP']:.4f}")
+                
                 print(f"      Inc separation: {val_metrics['inc_separation']:.4f}, "
                       f"Gate: {val_metrics['gate_mean']:.3f}±{val_metrics['gate_std']:.3f}")
                 

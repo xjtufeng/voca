@@ -23,7 +23,8 @@ class LAVDFLocalizationDataset(Dataset):
         split: str = 'train',
         max_frames: int = 512,
         stride: int = 1,
-        min_frames: int = 10
+        min_frames: int = 10,
+        event_centric_prob: float = 0.5
     ):
         """
         Args:
@@ -32,12 +33,15 @@ class LAVDFLocalizationDataset(Dataset):
             max_frames: Maximum frames per video (truncate if longer)
             stride: Frame sampling stride (1=all frames, 2=every other frame)
             min_frames: Minimum frames required (skip videos with fewer frames)
+            event_centric_prob: For fake videos in train split, probability of event-centric sampling
+                                0.5 = balanced (recommended), 0.7 = more focus on events, 1.0 = always event-centric
         """
         self.features_root = Path(features_root)
         self.split = split
         self.max_frames = max_frames
         self.stride = stride
         self.min_frames = min_frames
+        self.event_centric_prob = event_centric_prob
         
         # Scan for video feature directories
         self.samples = self._scan_samples()
@@ -148,6 +152,49 @@ class LAVDFLocalizationDataset(Dataset):
     def __len__(self) -> int:
         return len(self.samples)
     
+    def _get_event_centric_start(self, frame_labels: np.ndarray, total_frames: int) -> int:
+        """
+        Compute event-centric sampling start position.
+        Centers the window on a fake segment to ensure boundary learning.
+        
+        Args:
+            frame_labels: [T] frame labels
+            total_frames: Total number of frames before truncation
+        
+        Returns:
+            start: Starting index for window
+        """
+        # Find all fake segments
+        fake_indices = np.where(frame_labels == 1)[0]
+        
+        if len(fake_indices) == 0:
+            # Fallback to random (should not happen if called only for has_fake_frames)
+            return np.random.randint(0, total_frames - self.max_frames + 1)
+        
+        # Find segment boundaries
+        segments = []
+        start_seg = fake_indices[0]
+        prev_idx = fake_indices[0]
+        
+        for idx in fake_indices[1:]:
+            if idx - prev_idx > 1:  # Gap detected, new segment
+                segments.append((start_seg, prev_idx))
+                start_seg = idx
+            prev_idx = idx
+        segments.append((start_seg, prev_idx))  # Last segment
+        
+        # Randomly select one segment
+        seg_start, seg_end = segments[np.random.randint(len(segments))]
+        
+        # Center window on segment
+        seg_center = (seg_start + seg_end) // 2
+        window_start = seg_center - self.max_frames // 2
+        
+        # Ensure window is within bounds
+        window_start = max(0, min(window_start, total_frames - self.max_frames))
+        
+        return window_start
+    
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         sample = self.samples[idx]
         
@@ -176,10 +223,17 @@ class LAVDFLocalizationDataset(Dataset):
         
         # Truncate if too long
         if len(visual_emb) > self.max_frames:
-            # Random crop during training, center crop during val/test
-            if self.split == 'train':
+            # Video-level label (check if any fake frame)
+            has_fake_frames = frame_labels.sum() > 0
+            
+            if self.split == 'train' and has_fake_frames and np.random.rand() < self.event_centric_prob:
+                # Event-centric sampling: center on a fake segment
+                start = self._get_event_centric_start(frame_labels, len(visual_emb))
+            elif self.split == 'train':
+                # Random crop
                 start = np.random.randint(0, len(visual_emb) - self.max_frames + 1)
             else:
+                # Val/test: center crop
                 start = (len(visual_emb) - self.max_frames) // 2
             
             end = start + self.max_frames
@@ -272,6 +326,7 @@ def get_dataloaders(
     batch_size: int = 8,
     num_workers: int = 4,
     max_frames: int = 512,
+    event_centric_prob: float = 0.5,
     distributed: bool = False,
     rank: int = 0,
     world_size: int = 1,
@@ -286,6 +341,7 @@ def get_dataloaders(
         batch_size: Batch size
         num_workers: Number of worker processes
         max_frames: Max frames per video
+        event_centric_prob: Event-centric sampling probability for fake videos (train only)
     
     Returns:
         Dictionary of {split: DataLoader}
@@ -297,6 +353,7 @@ def get_dataloaders(
             features_root=features_root,
             split=split,
             max_frames=max_frames,
+            event_centric_prob=event_centric_prob,
             **kwargs
         )
 

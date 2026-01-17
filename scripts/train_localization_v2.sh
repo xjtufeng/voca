@@ -11,15 +11,21 @@ LR=1e-4
 # Enhanced model settings
 USE_INCONSISTENCY=true
 USE_GATING=true
+USE_BOUNDARY=true
 ALPHA_INIT=0.5
 TEMPERATURE=0.1
 
+# Sampling strategy
+EVENT_CENTRIC_PROB=0.5    # 50% event-centric for fake videos
+
 # Loss weights (carefully tuned)
 VIDEO_LOSS_WEIGHT=0.3
-SMOOTH_LOSS_WEIGHT=0.1
+BOUNDARY_LOSS_WEIGHT=0.5   # NEW: Critical for precise localization
+SMOOTH_LOSS_WEIGHT=0.05    # Reduced (boundary-aware version)
 RANKING_LOSS_WEIGHT=0.5    # Main contribution from inconsistency
 FAKE_HINGE_WEIGHT=0.05     # Auxiliary constraint
 RANKING_MARGIN=0.3
+BOUNDARY_TOLERANCE=5       # ±5 frames tolerance for boundary labels
 
 # Hard negatives config
 NEG_SHIFT_MIN=3
@@ -41,8 +47,9 @@ echo "Features: $FEATURES_ROOT"
 echo "Output: $OUTPUT_DIR"
 echo "GPUs: $NUM_GPUS"
 echo "Batch size: $BATCH_SIZE"
+echo "Boundary loss weight: $BOUNDARY_LOSS_WEIGHT"
 echo "Ranking loss weight: $RANKING_LOSS_WEIGHT"
-echo "Fake hinge weight: $FAKE_HINGE_WEIGHT"
+echo "Event-centric prob: $EVENT_CENTRIC_PROB"
 echo "========================================"
 
 # Build command
@@ -52,6 +59,7 @@ CMD="python train_lavdf_localization_v2.py \
     --batch_size $BATCH_SIZE \
     --num_workers 4 \
     --max_frames 512 \
+    --event_centric_prob $EVENT_CENTRIC_PROB \
     --v_dim 512 \
     --a_dim 1024 \
     --d_model 512 \
@@ -59,10 +67,12 @@ CMD="python train_lavdf_localization_v2.py \
     --num_layers 4 \
     --dropout 0.1 \
     --video_loss_weight $VIDEO_LOSS_WEIGHT \
+    --boundary_loss_weight $BOUNDARY_LOSS_WEIGHT \
     --smooth_loss_weight $SMOOTH_LOSS_WEIGHT \
     --ranking_loss_weight $RANKING_LOSS_WEIGHT \
     --fake_hinge_weight $FAKE_HINGE_WEIGHT \
     --ranking_margin $RANKING_MARGIN \
+    --boundary_tolerance $BOUNDARY_TOLERANCE \
     --neg_shift_min $NEG_SHIFT_MIN \
     --neg_shift_max $NEG_SHIFT_MAX \
     --neg_swap_prob $NEG_SWAP_PROB \
@@ -83,6 +93,10 @@ fi
 
 if [ "$USE_GATING" = true ]; then
     CMD="$CMD --use_reliability_gating"
+fi
+
+if [ "$USE_BOUNDARY" = true ]; then
+    CMD="$CMD --use_boundary_head --use_boundary_aware_smooth"
 fi
 
 # Multi-GPU training with DDP

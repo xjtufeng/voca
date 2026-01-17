@@ -127,6 +127,7 @@ class FrameLocalizationModel(nn.Module):
         use_video_head: bool = True,
         use_inconsistency_module: bool = True,
         use_reliability_gating: bool = True,
+        use_boundary_head: bool = True,
         alpha_init: float = 0.5,
         temperature: float = 0.1
     ):
@@ -143,6 +144,7 @@ class FrameLocalizationModel(nn.Module):
             use_video_head: Add video-level classification head
             use_inconsistency_module: Use learned inconsistency scoring
             use_reliability_gating: Use soft reliability gating
+            use_boundary_head: Add start/end boundary detection heads
             alpha_init: Initial weight for inconsistency branch fusion
             temperature: Temperature for inconsistency score scaling
         """
@@ -153,6 +155,7 @@ class FrameLocalizationModel(nn.Module):
         self.use_video_head = use_video_head
         self.use_inconsistency_module = use_inconsistency_module
         self.use_reliability_gating = use_reliability_gating
+        self.use_boundary_head = use_boundary_head
         self.temperature = temperature
         
         # Feature projection
@@ -208,6 +211,11 @@ class FrameLocalizationModel(nn.Module):
                 nn.Dropout(dropout * 2),
                 nn.Linear(256, 1)
             )
+        
+        # Boundary detection heads (extremely lightweight)
+        if use_boundary_head:
+            self.start_classifier = nn.Linear(d_model, 1)
+            self.end_classifier = nn.Linear(d_model, 1)
     
     def forward(
         self, 
@@ -229,6 +237,8 @@ class FrameLocalizationModel(nn.Module):
                 - inconsistency_score: [B, T, 1] raw inconsistency score
                 - inconsistency_gated: [B, T, 1] gated inconsistency score
                 - reliability_gate: [B, T, 1] reliability gate values
+                - start_logits: [B, T, 1] start boundary logits (optional)
+                - end_logits: [B, T, 1] end boundary logits (optional)
         """
         B, T, _ = visual.shape
         
@@ -298,13 +308,22 @@ class FrameLocalizationModel(nn.Module):
             
             video_logit = self.video_classifier(pooled)  # [B, 1]
         
+        # Boundary detection (start/end)
+        start_logits = None
+        end_logits = None
+        if self.use_boundary_head:
+            start_logits = self.start_classifier(encoded)  # [B, T, 1]
+            end_logits = self.end_classifier(encoded)      # [B, T, 1]
+        
         return {
             'frame_logits': frame_logits,
             'video_logit': video_logit,
             'frame_logits_main': frame_logits_main,
             'inconsistency_score': inconsistency_score,
             'inconsistency_gated': inconsistency_gated,
-            'reliability_gate': reliability_gate
+            'reliability_gate': reliability_gate,
+            'start_logits': start_logits,
+            'end_logits': end_logits
         }
 
 
@@ -444,6 +463,171 @@ def compute_temporal_smoothness_loss(
     return loss
 
 
+def generate_boundary_labels(
+    frame_labels: torch.Tensor,
+    mask: torch.Tensor,
+    tolerance: int = 5
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Generate start/end boundary labels with tolerance window.
+    Handles noise in frame-level annotations by allowing ±tolerance margin.
+    
+    Args:
+        frame_labels: [B, T] binary frame labels (0=real, 1=fake)
+        mask: [B, T] padding mask (True=padding)
+        tolerance: Boundary tolerance in frames (±delta)
+    
+    Returns:
+        start_labels: [B, T] binary (1=start boundary)
+        end_labels: [B, T] binary (1=end boundary)
+    """
+    B, T = frame_labels.shape
+    device = frame_labels.device
+    
+    start_labels = torch.zeros_like(frame_labels)
+    end_labels = torch.zeros_like(frame_labels)
+    
+    for b in range(B):
+        labels = frame_labels[b]
+        valid_mask = ~mask[b]
+        
+        if valid_mask.sum() == 0:
+            continue
+        
+        # Find transitions (only in valid region)
+        labels_padded = torch.cat([torch.zeros(1, device=device), labels, torch.zeros(1, device=device)])
+        diff = labels_padded[1:] - labels_padded[:-1]  # [T+1]
+        diff = diff[:-1]  # Remove last element -> [T]
+        
+        # Start points: 0→1 transition (diff == 1)
+        start_points = torch.where((diff == 1) & valid_mask)[0]
+        for start in start_points:
+            left = max(0, start - tolerance)
+            right = min(T, start + tolerance + 1)
+            start_labels[b, left:right] = 1
+        
+        # End points: 1→0 transition (diff == -1)
+        end_points = torch.where((diff == -1) & valid_mask)[0]
+        for end in end_points:
+            # End is the last fake frame (before transition)
+            end = end - 1 if end > 0 else 0
+            left = max(0, end - tolerance)
+            right = min(T, end + tolerance + 1)
+            end_labels[b, left:right] = 1
+        
+        # Handle edge cases: segment at video start
+        if valid_mask[0] and labels[0] == 1:
+            start_labels[b, :min(T, tolerance + 1)] = 1
+        
+        # Handle edge cases: segment at video end
+        valid_end = valid_mask.sum().item()
+        if valid_end > 0 and labels[valid_end - 1] == 1:
+            end_labels[b, max(0, valid_end - tolerance - 1):valid_end] = 1
+    
+    return start_labels, end_labels
+
+
+def compute_boundary_loss(
+    start_logits: torch.Tensor,
+    end_logits: torch.Tensor,
+    start_labels: torch.Tensor,
+    end_labels: torch.Tensor,
+    mask: torch.Tensor,
+    focal_gamma: float = 2.0,
+    focal_alpha: float = 0.25
+) -> torch.Tensor:
+    """
+    Focal loss for extremely sparse boundary labels.
+    Boundary labels are <0.5% of all frames, so Focal Loss is critical.
+    
+    Args:
+        start_logits: [B, T, 1] start boundary logits
+        end_logits: [B, T, 1] end boundary logits
+        start_labels: [B, T] start boundary labels
+        end_labels: [B, T] end boundary labels
+        mask: [B, T] padding mask
+        focal_gamma: Focal loss gamma parameter
+        focal_alpha: Focal loss alpha parameter
+    
+    Returns:
+        Scalar boundary loss (start + end)
+    """
+    # Flatten and filter valid frames
+    valid = ~mask
+    
+    start_logits_flat = start_logits.squeeze(-1)[valid]
+    end_logits_flat = end_logits.squeeze(-1)[valid]
+    start_labels_flat = start_labels[valid].float()
+    end_labels_flat = end_labels[valid].float()
+    
+    if len(start_logits_flat) == 0:
+        return torch.tensor(0.0, device=start_logits.device)
+    
+    # Focal loss for start
+    bce_start = F.binary_cross_entropy_with_logits(
+        start_logits_flat, start_labels_flat, reduction='none'
+    )
+    p_start = torch.sigmoid(start_logits_flat)
+    pt_start = start_labels_flat * p_start + (1 - start_labels_flat) * (1 - p_start)
+    focal_weight_start = (1 - pt_start) ** focal_gamma
+    loss_start = (focal_alpha * focal_weight_start * bce_start).mean()
+    
+    # Focal loss for end
+    bce_end = F.binary_cross_entropy_with_logits(
+        end_logits_flat, end_labels_flat, reduction='none'
+    )
+    p_end = torch.sigmoid(end_logits_flat)
+    pt_end = end_labels_flat * p_end + (1 - end_labels_flat) * (1 - p_end)
+    focal_weight_end = (1 - pt_end) ** focal_gamma
+    loss_end = (focal_alpha * focal_weight_end * bce_end).mean()
+    
+    return loss_start + loss_end
+
+
+def compute_boundary_aware_smooth_loss(
+    frame_probs: torch.Tensor,
+    frame_labels: torch.Tensor,
+    mask: torch.Tensor
+) -> torch.Tensor:
+    """
+    Boundary-aware smoothness loss.
+    Only smooths within same-label segments, preserving boundaries.
+    Critical improvement over global smoothing which blurs boundaries.
+    
+    Args:
+        frame_probs: [B, T] frame probabilities (after sigmoid)
+        frame_labels: [B, T] GT frame labels
+        mask: [B, T] padding mask
+    
+    Returns:
+        Scalar loss
+    """
+    B, T = frame_probs.shape
+    
+    if T <= 1:
+        return torch.tensor(0.0, device=frame_probs.device)
+    
+    # Identify where adjacent frames have same label
+    same_label = (frame_labels[:, 1:] == frame_labels[:, :-1])  # [B, T-1]
+    
+    # Both frames must be valid (not padding)
+    both_valid = ~mask[:, 1:] & ~mask[:, :-1]  # [B, T-1]
+    
+    # Smooth only within same-label segments
+    smooth_mask = same_label & both_valid
+    
+    if smooth_mask.sum() == 0:
+        return torch.tensor(0.0, device=frame_probs.device)
+    
+    # Compute squared difference
+    diff = (frame_probs[:, 1:] - frame_probs[:, :-1]) ** 2  # [B, T-1]
+    
+    # Apply mask and average
+    loss = (diff * smooth_mask.float()).sum() / smooth_mask.sum()
+    
+    return loss
+
+
 def compute_ranking_loss(
     inconsistency_pos: torch.Tensor,
     inconsistency_neg: torch.Tensor,
@@ -544,23 +728,28 @@ def compute_combined_loss(
     mask: torch.Tensor,
     video_logit: Optional[torch.Tensor] = None,
     video_label: Optional[torch.Tensor] = None,
+    start_logits: Optional[torch.Tensor] = None,
+    end_logits: Optional[torch.Tensor] = None,
     inconsistency_pos: Optional[torch.Tensor] = None,
     inconsistency_neg: Optional[torch.Tensor] = None,
     inconsistency_gated: Optional[torch.Tensor] = None,
     reliability_gate: Optional[torch.Tensor] = None,
     frame_loss_weight: float = 1.0,
     video_loss_weight: float = 0.3,
-    smooth_loss_weight: float = 0.1,
+    boundary_loss_weight: float = 0.5,
+    smooth_loss_weight: float = 0.05,
     ranking_loss_weight: float = 0.5,
     fake_hinge_weight: float = 0.05,
+    boundary_tolerance: int = 5,
     ranking_margin: float = 0.3,
+    use_boundary_aware_smooth: bool = True,
     pos_weight: Optional[float] = None,
     use_focal: bool = False,
     focal_alpha: float = 0.25,
     focal_gamma: float = 2.0
 ) -> Dict[str, torch.Tensor]:
     """
-    Compute combined loss with frame, video, smooth, ranking, and fake hinge losses.
+    Compute combined loss with frame, video, boundary, smooth, ranking, and fake hinge losses.
     
     Args:
         frame_logits: [B, T, 1] final frame logits
@@ -568,23 +757,28 @@ def compute_combined_loss(
         mask: [B, T] padding mask
         video_logit: [B, 1] video logit (optional)
         video_label: [B] video label (optional)
+        start_logits: [B, T, 1] start boundary logits (optional)
+        end_logits: [B, T, 1] end boundary logits (optional)
         inconsistency_pos: [B, T, 1] inconsistency for correct alignment (optional)
         inconsistency_neg: [B, T, 1] inconsistency for misalignment (optional)
         inconsistency_gated: [B, T, 1] gated inconsistency (optional)
         reliability_gate: [B, T, 1] reliability gate (optional)
         frame_loss_weight: Weight for frame BCE/Focal loss
         video_loss_weight: Weight for video loss
+        boundary_loss_weight: Weight for boundary loss (start + end)
         smooth_loss_weight: Weight for smoothness loss
-        ranking_loss_weight: Weight for ranking loss (NEW)
+        ranking_loss_weight: Weight for ranking loss
         fake_hinge_weight: Weight for fake hinge loss (optional)
+        boundary_tolerance: Tolerance window for boundary labels (±frames)
         ranking_margin: Margin for ranking loss
+        use_boundary_aware_smooth: Use boundary-aware smooth (recommended)
         pos_weight: Positive class weight for BCE
         use_focal: Use Focal Loss instead of BCE
         focal_alpha: Focal loss alpha
         focal_gamma: Focal loss gamma
     
     Returns:
-        Dict with 'total', 'frame', 'video', 'smooth', 'ranking', 'fake_hinge' losses
+        Dict with 'total', 'frame', 'video', 'boundary', 'smooth', 'ranking', 'fake_hinge' losses
     """
     # Frame loss
     frame_loss = compute_frame_loss(
@@ -600,13 +794,32 @@ def compute_combined_loss(
     if video_logit is not None and video_label is not None:
         video_loss = compute_video_loss(video_logit, video_label)
     
+    # Boundary loss (NEW: critical for precise localization)
+    boundary_loss = torch.tensor(0.0, device=frame_logits.device)
+    if boundary_loss_weight > 0 and start_logits is not None and end_logits is not None:
+        # Generate boundary labels with tolerance
+        start_labels, end_labels = generate_boundary_labels(
+            frame_labels, mask, tolerance=boundary_tolerance
+        )
+        boundary_loss = compute_boundary_loss(
+            start_logits, end_logits, start_labels, end_labels, mask,
+            focal_gamma=focal_gamma, focal_alpha=focal_alpha
+        )
+    
     # Smoothness loss
     smooth_loss = torch.tensor(0.0, device=frame_logits.device)
     if smooth_loss_weight > 0:
         frame_probs = torch.sigmoid(frame_logits.squeeze(-1))
-        smooth_loss = compute_temporal_smoothness_loss(frame_probs, mask)
+        if use_boundary_aware_smooth:
+            # Boundary-aware: only smooth within same-label segments
+            smooth_loss = compute_boundary_aware_smooth_loss(
+                frame_probs, frame_labels, mask
+            )
+        else:
+            # Original: global smoothness (not recommended with boundary head)
+            smooth_loss = compute_temporal_smoothness_loss(frame_probs, mask)
     
-    # Ranking loss (NEW: key improvement)
+    # Ranking loss (from inconsistency module)
     ranking_loss = torch.tensor(0.0, device=frame_logits.device)
     if ranking_loss_weight > 0 and inconsistency_pos is not None and inconsistency_neg is not None:
         ranking_loss = compute_ranking_loss(
@@ -625,6 +838,7 @@ def compute_combined_loss(
     total_loss = (
         frame_loss_weight * frame_loss +
         video_loss_weight * video_loss +
+        boundary_loss_weight * boundary_loss +
         smooth_loss_weight * smooth_loss +
         ranking_loss_weight * ranking_loss +
         fake_hinge_weight * fake_hinge_loss
@@ -634,6 +848,7 @@ def compute_combined_loss(
         'total': total_loss,
         'frame': frame_loss,
         'video': video_loss,
+        'boundary': boundary_loss,
         'smooth': smooth_loss,
         'ranking': ranking_loss,
         'fake_hinge': fake_hinge_loss
@@ -687,8 +902,8 @@ def generate_hard_negatives(
 
 
 if __name__ == '__main__':
-    # Test model
-    print("[TEST] Creating enhanced model...")
+    # Test model with boundary heads
+    print("[TEST] Creating enhanced model with boundary heads...")
     model = FrameLocalizationModel(
         v_dim=512,
         a_dim=1024,
@@ -698,7 +913,8 @@ if __name__ == '__main__':
         use_cross_attn=True,
         use_video_head=True,
         use_inconsistency_module=True,
-        use_reliability_gating=True
+        use_reliability_gating=True,
+        use_boundary_head=True
     )
     
     print(f"Total parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
@@ -714,11 +930,22 @@ if __name__ == '__main__':
     outputs = model(visual, audio, mask)
     print(f"Frame logits: {outputs['frame_logits'].shape}")
     print(f"Video logit: {outputs['video_logit'].shape}")
+    print(f"Start logits: {outputs['start_logits'].shape}")
+    print(f"End logits: {outputs['end_logits'].shape}")
     print(f"Inconsistency score: {outputs['inconsistency_score'].shape}")
     print(f"Reliability gate: {outputs['reliability_gate'].shape}")
     print(f"Inconsistency range: [{outputs['inconsistency_score'].min():.3f}, {outputs['inconsistency_score'].max():.3f}]")
     print(f"Gate range: [{outputs['reliability_gate'].min():.3f}, {outputs['reliability_gate'].max():.3f}]")
     print(f"Alpha (fusion weight): {model.alpha.item():.3f}")
+    
+    # Test boundary label generation
+    print(f"\n[TEST] Generating boundary labels...")
+    frame_labels = torch.randint(0, 2, (B, T))
+    frame_labels[:, 50:100] = 1  # Create a fake segment
+    frame_labels[:, 150:180] = 1  # Another fake segment
+    start_labels, end_labels = generate_boundary_labels(frame_labels, mask, tolerance=5)
+    print(f"Start labels shape: {start_labels.shape}, positives: {start_labels.sum().item()}")
+    print(f"End labels shape: {end_labels.shape}, positives: {end_labels.sum().item()}")
     
     # Test hard negative generation
     print(f"\n[TEST] Generating hard negatives...")
@@ -732,8 +959,7 @@ if __name__ == '__main__':
     print(f"Mean inconsistency (pos): {inconsistency_pos.mean():.3f}")
     print(f"Mean inconsistency (neg): {inconsistency_neg.mean():.3f}")
     
-    # Test loss computation
-    frame_labels = torch.randint(0, 2, (B, T))
+    # Test loss computation with boundary loss
     video_labels = torch.randint(0, 2, (B,))
     
     losses = compute_combined_loss(
@@ -742,15 +968,20 @@ if __name__ == '__main__':
         mask=mask,
         video_logit=outputs['video_logit'],
         video_label=video_labels,
+        start_logits=outputs['start_logits'],
+        end_logits=outputs['end_logits'],
         inconsistency_pos=inconsistency_pos,
         inconsistency_neg=inconsistency_neg,
         inconsistency_gated=outputs['inconsistency_gated'],
         reliability_gate=outputs['reliability_gate'],
         frame_loss_weight=1.0,
         video_loss_weight=0.3,
-        smooth_loss_weight=0.1,
+        boundary_loss_weight=0.5,
+        smooth_loss_weight=0.05,
         ranking_loss_weight=0.5,
         fake_hinge_weight=0.05,
+        boundary_tolerance=5,
+        use_boundary_aware_smooth=True,
         pos_weight=5.0
     )
     
@@ -758,9 +989,10 @@ if __name__ == '__main__':
     print(f"Total loss: {losses['total'].item():.4f}")
     print(f"Frame loss: {losses['frame'].item():.4f}")
     print(f"Video loss: {losses['video'].item():.4f}")
+    print(f"Boundary loss: {losses['boundary'].item():.4f}")
     print(f"Smooth loss: {losses['smooth'].item():.4f}")
     print(f"Ranking loss: {losses['ranking'].item():.4f}")
     print(f"Fake hinge loss: {losses['fake_hinge'].item():.4f}")
     
-    print(f"\n[TEST] Enhanced model test passed!")
+    print(f"\n[TEST] Enhanced model with boundary heads test passed!")
 
