@@ -228,11 +228,9 @@ def evaluate(
     all_start_probs = []
     all_end_probs = []
     
-    # Segment-level evaluation (sample only for speed)
+    # Segment-level evaluation (full dev set)
     all_pred_segments = []
     all_gt_segments = []
-    max_segment_eval_samples = 100  # Only evaluate first 100 videos for segment metrics
-    segment_eval_count = 0
     
     if rank == 0:
         pbar = tqdm(loader, desc="Evaluating")
@@ -280,8 +278,8 @@ def evaluate(
                 all_inconsistency_scores.append(inconsistency_score[i][valid_mask].squeeze(-1).cpu().numpy())
                 all_gate_values.append(reliability_gate[i][valid_mask].squeeze(-1).cpu().numpy())
                 
-                # Segment-level: Two-stage inference (sample only for speed)
-                if start_probs is not None and end_probs is not None and segment_eval_count < max_segment_eval_samples:
+                # Segment-level: Two-stage inference (full evaluation)
+                if start_probs is not None and end_probs is not None:
                     start_probs_i = start_probs[i][valid_mask].cpu().numpy()
                     end_probs_i = end_probs[i][valid_mask].cpu().numpy()
                     all_start_probs.append(start_probs_i)
@@ -300,12 +298,8 @@ def evaluate(
                         # Get GT segments
                         gt_segments = get_segments_from_binary((frame_labels_i == 1).astype(int))
                         all_gt_segments.extend(gt_segments)
-                        
-                        segment_eval_count += 1
                     except Exception as e:
                         # Skip if evaluation fails (avoid numpy overflow)
-                        if rank == 0:
-                            print(f"Warning: Segment evaluation failed for sample {segment_eval_count}: {e}")
                         pass
         
         all_video_probs.extend(video_probs.cpu().numpy())
