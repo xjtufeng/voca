@@ -259,15 +259,15 @@ def evaluate(
             reliability_gate = outputs['reliability_gate']
         
         # Frame-level predictions
-        frame_probs = torch.sigmoid(frame_logits.squeeze(-1))  # [B, T]
+        frame_probs = torch.sigmoid(frame_logits.squeeze(-1)).float()  # [B, T]
         
         # Boundary predictions
-        start_probs = torch.sigmoid(start_logits.squeeze(-1)) if start_logits is not None else None  # [B, T]
-        end_probs = torch.sigmoid(end_logits.squeeze(-1)) if end_logits is not None else None  # [B, T]
+        start_probs = torch.sigmoid(start_logits.squeeze(-1)).float() if start_logits is not None else None  # [B, T]
+        end_probs = torch.sigmoid(end_logits.squeeze(-1)).float() if end_logits is not None else None  # [B, T]
         
         # Video-level predictions
         if video_logit is not None:
-            video_probs = torch.sigmoid(video_logit.squeeze(-1))  # [B]
+            video_probs = torch.sigmoid(video_logit.squeeze(-1)).float()  # [B]
         else:
             video_probs = frame_probs.mean(dim=1)  # [B]
         
@@ -279,15 +279,15 @@ def evaluate(
                     stop_eval = True
                     break
                 # Frame-level
-                frame_probs_i = frame_probs[i][valid_mask].cpu().numpy()
+                frame_probs_i = frame_probs[i][valid_mask].cpu().numpy().astype(np.float32, copy=False)
                 frame_labels_i = frame_labels[i][valid_mask].cpu().numpy()
                 if eval_stride > 1:
                     frame_probs_i = frame_probs_i[::eval_stride]
                     frame_labels_i = frame_labels_i[::eval_stride]
                 all_frame_probs.append(frame_probs_i)
                 all_frame_labels.append(frame_labels_i)
-                inc_i = inconsistency_score[i][valid_mask].squeeze(-1).cpu().numpy()
-                gate_i = reliability_gate[i][valid_mask].squeeze(-1).cpu().numpy()
+                inc_i = inconsistency_score[i][valid_mask].squeeze(-1).cpu().numpy().astype(np.float32, copy=False)
+                gate_i = reliability_gate[i][valid_mask].squeeze(-1).cpu().numpy().astype(np.float32, copy=False)
                 if eval_stride > 1:
                     inc_i = inc_i[::eval_stride]
                     gate_i = gate_i[::eval_stride]
@@ -300,8 +300,8 @@ def evaluate(
                 
                 # Segment-level: Two-stage inference (only if requested)
                 if do_segment_eval and start_probs is not None and end_probs is not None:
-                    start_probs_i = start_probs[i][valid_mask].cpu().numpy()
-                    end_probs_i = end_probs[i][valid_mask].cpu().numpy()
+                    start_probs_i = start_probs[i][valid_mask].cpu().numpy().astype(np.float32, copy=False)
+                    end_probs_i = end_probs[i][valid_mask].cpu().numpy().astype(np.float32, copy=False)
                     
                     # Run two-stage localization
                     try:
@@ -324,13 +324,13 @@ def evaluate(
                         pass
                 videos_seen += 1
         
-        all_video_probs.extend(video_probs.cpu().numpy())
+        all_video_probs.extend(video_probs.cpu().numpy().astype(np.float32, copy=False))
         all_video_labels.extend(video_labels.cpu().numpy())
         if stop_eval:
             break
     
     # Compute frame-level metrics
-    frame_probs_flat = np.concatenate(all_frame_probs)
+    frame_probs_flat = np.concatenate(all_frame_probs).astype(np.float32, copy=False)
     frame_labels_flat = np.concatenate(all_frame_labels)
     
     frame_auc = roc_auc_score(frame_labels_flat, frame_probs_flat)
@@ -342,15 +342,15 @@ def evaluate(
     frame_recall = recall_score(frame_labels_flat, frame_preds, zero_division=0)
     
     # Compute video-level metrics
-    video_probs_arr = np.array(all_video_probs)
+    video_probs_arr = np.array(all_video_probs, dtype=np.float32)
     video_labels_arr = np.array(all_video_labels)
     
     video_auc = roc_auc_score(video_labels_arr, video_probs_arr)
     video_ap = average_precision_score(video_labels_arr, video_probs_arr)
     
     # Enhanced metrics
-    inconsistency_flat = np.concatenate(all_inconsistency_scores)
-    gate_flat = np.concatenate(all_gate_values)
+    inconsistency_flat = np.concatenate(all_inconsistency_scores).astype(np.float32, copy=False)
+    gate_flat = np.concatenate(all_gate_values).astype(np.float32, copy=False)
     
     # Mean inconsistency for real vs fake frames
     real_inc_mean = inconsistency_flat[frame_labels_flat == 0].mean()
@@ -358,8 +358,8 @@ def evaluate(
     inc_separation = fake_inc_mean - real_inc_mean  # Should be positive (fake > real)
     
     # Gate statistics
-    gate_mean = gate_flat.mean()
-    gate_std = gate_flat.std()
+    gate_mean = float(np.mean(gate_flat, dtype=np.float64))
+    gate_std = float(np.std(gate_flat, dtype=np.float64))
     
     # Segment-level metrics (per-video mean to avoid cross-video matching)
     segment_metrics = {}
