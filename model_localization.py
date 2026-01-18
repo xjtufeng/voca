@@ -752,10 +752,12 @@ def compute_combined_loss(
     pos_weight: Optional[float] = None,
     use_focal: bool = False,
     focal_alpha: float = 0.25,
-    focal_gamma: float = 2.0
+    focal_gamma: float = 2.0,
+    inconsistency_sup_weight: float = 0.0,
+    inconsistency_sup_temperature: float = 0.1
 ) -> Dict[str, torch.Tensor]:
     """
-    Compute combined loss with frame, video, boundary, smooth, ranking, and fake hinge losses.
+    Compute combined loss with frame, video, boundary, smooth, ranking, fake hinge, and optional inconsistency supervision losses.
     
     Args:
         frame_logits: [B, T, 1] final frame logits
@@ -775,16 +777,18 @@ def compute_combined_loss(
         smooth_loss_weight: Weight for smoothness loss
         ranking_loss_weight: Weight for ranking loss
         fake_hinge_weight: Weight for fake hinge loss (optional)
-        boundary_tolerance: Tolerance window for boundary labels (±frames)
+        boundary_tolerance: Tolerance window for boundary labels (?frames)
         ranking_margin: Margin for ranking loss
         use_boundary_aware_smooth: Use boundary-aware smooth (recommended)
         pos_weight: Positive class weight for BCE
         use_focal: Use Focal Loss instead of BCE
         focal_alpha: Focal loss alpha
         focal_gamma: Focal loss gamma
+        inconsistency_sup_weight: Weight for direct inconsistency supervision (optional)
+        inconsistency_sup_temperature: Temperature for inconsistency supervision logits
     
     Returns:
-        Dict with 'total', 'frame', 'video', 'boundary', 'smooth', 'ranking', 'fake_hinge' losses
+        Dict with 'total', 'frame', 'video', 'boundary', 'smooth', 'ranking', 'fake_hinge', 'inconsistency_sup' losses
     """
     # Frame loss
     frame_loss = compute_frame_loss(
@@ -839,6 +843,17 @@ def compute_combined_loss(
         fake_hinge_loss = compute_fake_hinge_loss(
             inconsistency_gated, frame_labels, mask
         )
+
+    # Direct supervision on inconsistency logits (optional, lightweight)
+    inconsistency_sup_loss = torch.tensor(0.0, device=frame_logits.device)
+    if inconsistency_sup_weight > 0 and inconsistency_gated is not None:
+        inc_logits = (inconsistency_gated.squeeze(-1) / inconsistency_sup_temperature)
+        valid_mask = ~mask
+        if valid_mask.any():
+            inc_logits_valid = inc_logits[valid_mask]
+            inc_labels_valid = frame_labels[valid_mask].float()
+            bce_inc = nn.BCEWithLogitsLoss()
+            inconsistency_sup_loss = bce_inc(inc_logits_valid, inc_labels_valid)
     
     # Total loss
     total_loss = (
@@ -847,7 +862,8 @@ def compute_combined_loss(
         boundary_loss_weight * boundary_loss +
         smooth_loss_weight * smooth_loss +
         ranking_loss_weight * ranking_loss +
-        fake_hinge_weight * fake_hinge_loss
+        fake_hinge_weight * fake_hinge_loss +
+        inconsistency_sup_weight * inconsistency_sup_loss
     )
     
     return {
@@ -857,9 +873,9 @@ def compute_combined_loss(
         'boundary': boundary_loss,
         'smooth': smooth_loss,
         'ranking': ranking_loss,
-        'fake_hinge': fake_hinge_loss
+        'fake_hinge': fake_hinge_loss,
+        'inconsistency_sup': inconsistency_sup_loss
     }
-
 
 def generate_hard_negatives(
     audio: torch.Tensor,

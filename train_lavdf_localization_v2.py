@@ -107,19 +107,22 @@ def train_epoch(
         # Forward pass with AMP
         with _autocast_ctx(device):
             # Forward with correct audio (positive pair)
-            outputs_pos = model(visual, audio, mask)
-            frame_logits = outputs_pos['frame_logits']
-            video_logit = outputs_pos['video_logit']
-            start_logits = outputs_pos['start_logits']
-            end_logits = outputs_pos['end_logits']
-            inconsistency_pos = outputs_pos['inconsistency_score']
-            inconsistency_gated = outputs_pos['inconsistency_gated']
-            reliability_gate = outputs_pos['reliability_gate']
-            
-            # Generate hard negatives and forward (for ranking loss)
-            audio_neg = generate_hard_negatives(
-                audio, mask,
-                shift_range=(args.neg_shift_min, args.neg_shift_max),
+        outputs_pos = model(visual, audio, mask)
+        frame_logits = outputs_pos['frame_logits']
+        video_logit = outputs_pos['video_logit']
+        start_logits = outputs_pos['start_logits']
+        end_logits = outputs_pos['end_logits']
+        inconsistency_pos = outputs_pos['inconsistency_score']
+        inconsistency_gated = outputs_pos['inconsistency_gated']
+        reliability_gate = outputs_pos['reliability_gate']
+        # Warmup: force gate to 1 in early epochs to let ranking/inconsistency learn
+        if args.gate_warmup_epochs > 0 and epoch <= args.gate_warmup_epochs:
+            reliability_gate = torch.ones_like(frame_logits) if reliability_gate is None else torch.ones_like(reliability_gate)
+        
+        # Generate hard negatives and forward (for ranking loss)
+        audio_neg = generate_hard_negatives(
+            audio, mask,
+            shift_range=(args.neg_shift_min, args.neg_shift_max),
                 swap_prob=args.neg_swap_prob
             )
             outputs_neg = model(visual, audio_neg, mask)
@@ -144,13 +147,15 @@ def train_epoch(
                 smooth_loss_weight=args.smooth_loss_weight,
                 ranking_loss_weight=args.ranking_loss_weight,
                 fake_hinge_weight=args.fake_hinge_weight,
+                inconsistency_sup_weight=args.inconsistency_sup_weight,
                 boundary_tolerance=args.boundary_tolerance,
                 ranking_margin=args.ranking_margin,
                 use_boundary_aware_smooth=args.use_boundary_aware_smooth,
                 pos_weight=args.pos_weight if args.pos_weight > 0 else None,
                 use_focal=args.use_focal,
                 focal_alpha=args.focal_alpha,
-                focal_gamma=args.focal_gamma
+                focal_gamma=args.focal_gamma,
+                inconsistency_sup_temperature=args.temperature
             )
             
             loss = losses['total']
@@ -436,6 +441,8 @@ def main():
     parser.add_argument('--smooth_loss_weight', type=float, default=0.05)
     parser.add_argument('--ranking_loss_weight', type=float, default=0.1)
     parser.add_argument('--fake_hinge_weight', type=float, default=0.05)
+    parser.add_argument('--inconsistency_sup_weight', type=float, default=0.1,
+                        help='Direct BCE supervision on inconsistency logits')
     parser.add_argument('--ranking_margin', type=float, default=0.3)
     parser.add_argument('--boundary_tolerance', type=int, default=5)
     parser.add_argument('--use_boundary_aware_smooth', action='store_true', default=True)
@@ -450,6 +457,8 @@ def main():
     parser.add_argument('--use_focal', action='store_true')
     parser.add_argument('--focal_alpha', type=float, default=0.25)
     parser.add_argument('--focal_gamma', type=float, default=2.0)
+    parser.add_argument('--gate_warmup_epochs', type=int, default=5,
+                        help='Force reliability gate=1 for the first N epochs')
     
     # Training
     parser.add_argument('--epochs', type=int, default=100)
