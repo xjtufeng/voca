@@ -77,6 +77,10 @@ def train_epoch(
 ) -> Dict[str, float]:
     """Train for one epoch with enhanced loss"""
     model.train()
+    if args.freeze_alpha_epochs > 0 and epoch <= args.freeze_alpha_epochs:
+        with torch.no_grad():
+            alpha = model.module.alpha if hasattr(model, "module") else model.alpha
+            alpha.fill_(args.alpha_fixed)
     
     total_loss = 0
     total_frame_loss = 0
@@ -167,6 +171,10 @@ def train_epoch(
         
         scaler.step(optimizer)
         scaler.update()
+        if args.alpha_min > 0:
+            with torch.no_grad():
+                alpha = model.module.alpha if hasattr(model, "module") else model.alpha
+                alpha.clamp_(min=args.alpha_min)
         
         # Accumulate losses
         total_loss += loss.item()
@@ -302,14 +310,17 @@ def evaluate(
                 if do_segment_eval and start_probs is not None and end_probs is not None:
                     start_probs_i = start_probs[i][valid_mask].cpu().numpy().astype(np.float32, copy=False)
                     end_probs_i = end_probs[i][valid_mask].cpu().numpy().astype(np.float32, copy=False)
+                    if eval_stride > 1:
+                        start_probs_i = start_probs_i[::eval_stride]
+                        end_probs_i = end_probs_i[::eval_stride]
                     
                     # Run two-stage localization
                     try:
                         pred_segments = two_stage_localization(
                             frame_probs_i, start_probs_i, end_probs_i,
-                            thresholds=[0.3, 0.4, 0.5],
+                            thresholds=[0.05, 0.10, 0.15, 0.20, 0.25, 0.30],
                             refine_delta=10,
-                            min_len=5
+                            min_len=3
                         )
                         # Get GT segments
                         gt_segments = get_segments_from_binary((frame_labels_i == 1).astype(int))
@@ -320,8 +331,8 @@ def evaluate(
                             )
                             segment_metrics_list.append(metrics_i)
                     except Exception as e:
-                        # Skip if evaluation fails (avoid numpy overflow)
-                        pass
+                        if rank == 0 and getattr(args, "debug_eval", False):
+                            print(f"Segment eval error: {repr(e)}")
                 videos_seen += 1
         
         all_video_probs.extend(video_probs.cpu().numpy().astype(np.float32, copy=False))
@@ -412,6 +423,12 @@ def main():
     parser.add_argument('--use_boundary_head', action='store_true', default=True)
     parser.add_argument('--alpha_init', type=float, default=0.3)
     parser.add_argument('--temperature', type=float, default=0.5)
+    parser.add_argument('--freeze_alpha_epochs', type=int, default=5,
+                        help='Freeze alpha to a fixed value for early epochs')
+    parser.add_argument('--alpha_fixed', type=float, default=1.0,
+                        help='Fixed alpha value during warmup')
+    parser.add_argument('--alpha_min', type=float, default=0.5,
+                        help='Minimum alpha value after warmup')
     
     # Loss weights
     parser.add_argument('--video_loss_weight', type=float, default=0.3)
@@ -446,6 +463,8 @@ def main():
                         help='Limit number of videos for validation (0 = no limit)')
     parser.add_argument('--eval_stride', type=int, default=1,
                         help='Downsample frames during validation metrics (1 = no downsample)')
+    parser.add_argument('--debug_eval', action='store_true',
+                        help='Print segment-level evaluation exceptions on rank0')
     
     # Output
     parser.add_argument('--output_dir', type=str, default='./checkpoints/localization_v2')
