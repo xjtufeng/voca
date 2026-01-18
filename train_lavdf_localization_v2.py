@@ -107,22 +107,22 @@ def train_epoch(
         # Forward pass with AMP
         with _autocast_ctx(device):
             # Forward with correct audio (positive pair)
-        outputs_pos = model(visual, audio, mask)
-        frame_logits = outputs_pos['frame_logits']
-        video_logit = outputs_pos['video_logit']
-        start_logits = outputs_pos['start_logits']
-        end_logits = outputs_pos['end_logits']
-        inconsistency_pos = outputs_pos['inconsistency_score']
-        inconsistency_gated = outputs_pos['inconsistency_gated']
-        reliability_gate = outputs_pos['reliability_gate']
-        # Warmup: force gate to 1 in early epochs to let ranking/inconsistency learn
-        if args.gate_warmup_epochs > 0 and epoch <= args.gate_warmup_epochs:
-            reliability_gate = torch.ones_like(frame_logits) if reliability_gate is None else torch.ones_like(reliability_gate)
-        
-        # Generate hard negatives and forward (for ranking loss)
-        audio_neg = generate_hard_negatives(
-            audio, mask,
-            shift_range=(args.neg_shift_min, args.neg_shift_max),
+            outputs_pos = model(visual, audio, mask)
+            frame_logits = outputs_pos['frame_logits']
+            video_logit = outputs_pos['video_logit']
+            start_logits = outputs_pos['start_logits']
+            end_logits = outputs_pos['end_logits']
+            inconsistency_pos = outputs_pos['inconsistency_score']
+            inconsistency_gated = outputs_pos['inconsistency_gated']
+            reliability_gate = outputs_pos['reliability_gate']
+            # Warmup: force gate to 1 in early epochs to let ranking/inconsistency learn
+            if args.gate_warmup_epochs > 0 and epoch <= args.gate_warmup_epochs:
+                reliability_gate = torch.ones_like(frame_logits) if reliability_gate is None else torch.ones_like(reliability_gate)
+
+            # Generate hard negatives and forward (for ranking loss)
+            audio_neg = generate_hard_negatives(
+                audio, mask,
+                shift_range=(args.neg_shift_min, args.neg_shift_max),
                 swap_prob=args.neg_swap_prob
             )
             outputs_neg = model(visual, audio_neg, mask)
