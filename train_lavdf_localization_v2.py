@@ -300,7 +300,10 @@ def evaluate(
                 all_frame_probs.append(frame_probs_i)
                 all_frame_labels.append(frame_labels_i)
                 inc_i = inconsistency_score[i][valid_mask].squeeze(-1).cpu().numpy().astype(np.float32, copy=False)
-                gate_i = reliability_gate[i][valid_mask].squeeze(-1).cpu().numpy().astype(np.float32, copy=False)
+                if reliability_gate is not None:
+                    gate_i = reliability_gate[i][valid_mask].squeeze(-1).cpu().numpy().astype(np.float32, copy=False)
+                else:
+                    gate_i = np.ones_like(inc_i, dtype=np.float32)
                 if eval_stride > 1:
                     inc_i = inc_i[::eval_stride]
                     gate_i = gate_i[::eval_stride]
