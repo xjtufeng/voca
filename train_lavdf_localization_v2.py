@@ -425,6 +425,8 @@ def main():
     parser.add_argument('--use_video_head', action='store_true', default=True)
     parser.add_argument('--use_inconsistency_module', action='store_true', default=True)
     parser.add_argument('--use_reliability_gating', action='store_true', default=True)
+    parser.add_argument('--no_reliability_gating', action='store_true',
+                        help='Disable reliability gating (override)')
     parser.add_argument('--use_boundary_head', action='store_true', default=True)
     parser.add_argument('--alpha_init', type=float, default=0.3)
     parser.add_argument('--temperature', type=float, default=0.5)
@@ -531,7 +533,7 @@ def main():
         use_cross_attn=args.use_cross_attn,
         use_video_head=args.use_video_head,
         use_inconsistency_module=args.use_inconsistency_module,
-        use_reliability_gating=args.use_reliability_gating,
+        use_reliability_gating=(args.use_reliability_gating and not args.no_reliability_gating),
         use_boundary_head=args.use_boundary_head,
         alpha_init=args.alpha_init,
         temperature=args.temperature
