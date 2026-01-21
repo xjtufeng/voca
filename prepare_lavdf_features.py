@@ -152,23 +152,37 @@ def process_lavdf_video(
     # 对齐：如果提取的 visual_embeddings 帧数少于 total_frames（可能有跳帧/检测失败）
     # 我们按照提取出的帧路径（frame_xxxx.png）来索引对应标签
     extracted_frame_labels = []
+    frame_ids = []
     for p in paths:
-        # frame_0001.png -> frame_id=1
-        fname = Path(p).stem  # "frame_0001"
+        # frame_000001.png -> frame_id=1 (or 0 depending on extractor)
+        fname = Path(p).stem  # "frame_000001"
         frame_id = int(fname.split("_")[-1])
-        if frame_id < len(frame_labels_full):
+        frame_ids.append(frame_id)
+
+    # Heuristic: if frames look 1-based (no 0 and min==1), shift by -1
+    if frame_ids:
+        min_id = min(frame_ids)
+        has_zero = 0 in frame_ids
+        if min_id == 1 and not has_zero:
+            frame_ids = [fid - 1 for fid in frame_ids]
+
+    for frame_id in frame_ids:
+        if 0 <= frame_id < len(frame_labels_full):
             extracted_frame_labels.append(frame_labels_full[frame_id])
         else:
             extracted_frame_labels.append(0)  # fallback
-    
+
     extracted_frame_labels = np.array(extracted_frame_labels, dtype=np.int32)
+    frame_ids = np.array(frame_ids, dtype=np.int32)
     
     # 保存 visual embeddings + frame_labels
     np.savez(
         visual_npz,
         embeddings=visual_embeddings,
         paths=paths,
-        frame_labels=extracted_frame_labels
+        frame_labels=extracted_frame_labels,
+        frame_ids=frame_ids,
+        fps=float(fps)
     )
     
     # 4) 音频提取 + embeddings

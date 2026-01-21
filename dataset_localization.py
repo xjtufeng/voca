@@ -203,6 +203,8 @@ class LAVDFLocalizationDataset(Dataset):
             visual_data = np.load(sample['visual_file'])
             visual_emb = visual_data['embeddings']  # [T_v, 512]
             frame_labels = visual_data['frame_labels']  # [T_v]
+            frame_ids = visual_data['frame_ids'] if 'frame_ids' in visual_data.files else None
+            fps = float(visual_data['fps']) if 'fps' in visual_data.files else None
             
             # Load audio embeddings
             audio_data = np.load(sample['audio_file'])
@@ -220,8 +222,14 @@ class LAVDFLocalizationDataset(Dataset):
             indices = np.arange(0, len(visual_emb), self.stride)
             visual_emb = visual_emb[indices]
             frame_labels = frame_labels[indices]
+            if frame_ids is not None:
+                frame_ids = frame_ids[indices]
         
         # Truncate if too long
+        orig_T_v = len(visual_emb)
+        start = 0
+        end = orig_T_v
+        frame_ids_full = frame_ids
         if len(visual_emb) > self.max_frames:
             # Video-level label (check if any fake frame)
             has_fake_frames = frame_labels.sum() > 0
@@ -239,14 +247,39 @@ class LAVDFLocalizationDataset(Dataset):
             end = start + self.max_frames
             visual_emb = visual_emb[start:end]
             frame_labels = frame_labels[start:end]
+            if frame_ids is not None:
+                frame_ids = frame_ids[start:end]
         
-        # Align audio to visual frames (linear interpolation)
+        # Align audio to visual frames (crop audio window, then interpolate)
         T_v = len(visual_emb)
         T_a = len(audio_emb)
         
         if T_a != T_v:
-            # Interpolate audio to match visual length
-            audio_emb = self._interpolate_audio(audio_emb, T_v)
+            audio_seg = audio_emb
+            if frame_ids is not None and fps is not None and len(frame_ids_full) > 0:
+                t0 = float(frame_ids_full[0]) / fps
+                t1 = float(frame_ids_full[-1]) / fps
+                total_duration = t1 - t0
+                if total_duration > 0 and T_a > 1 and frame_ids is not None and len(frame_ids) > 0:
+                    t_start = float(frame_ids[0]) / fps
+                    t_end = float(frame_ids[-1]) / fps
+                    a_start = int(round((t_start - t0) / total_duration * (T_a - 1)))
+                    a_end = int(round((t_end - t0) / total_duration * (T_a - 1)))
+                    a_start = max(0, min(a_start, T_a - 1))
+                    a_end = max(a_start, min(a_end, T_a - 1))
+                    audio_seg = audio_emb[a_start:a_end + 1]
+            else:
+                if orig_T_v > 0:
+                    a_start = int(np.floor(start / orig_T_v * T_a))
+                    a_end = int(np.ceil(end / orig_T_v * T_a)) - 1
+                    a_start = max(0, min(a_start, T_a - 1))
+                    a_end = max(a_start, min(a_end, T_a - 1))
+                    audio_seg = audio_emb[a_start:a_end + 1]
+
+            if len(audio_seg) != T_v:
+                audio_emb = self._interpolate_audio(audio_seg, T_v)
+            else:
+                audio_emb = audio_seg
         
         # Video-level label (any fake frame -> fake video)
         video_label = 1 if frame_labels.sum() > 0 else 0
@@ -264,6 +297,11 @@ class LAVDFLocalizationDataset(Dataset):
         """Interpolate audio embeddings to match visual length"""
         T_a, D = audio_emb.shape
         
+        if T_a == 0:
+            return np.zeros((target_len, D), dtype=audio_emb.dtype)
+        if T_a == 1:
+            return np.repeat(audio_emb, target_len, axis=0)
+
         # Linear interpolation
         indices = np.linspace(0, T_a - 1, target_len)
         
@@ -424,4 +462,3 @@ if __name__ == '__main__':
     print(f"Batch frame_labels: {batch['frame_labels'].shape}")
     print(f"Batch mask: {batch['mask'].shape}")
     print(f"Batch video_labels: {batch['video_labels']}")
-

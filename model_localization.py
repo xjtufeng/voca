@@ -293,11 +293,13 @@ class FrameLocalizationModel(nn.Module):
         # Main branch: frame-level classification
         frame_logits_main = self.frame_classifier(encoded)  # [B, T, 1]
         
-        # Logit-level fusion: frame_logit = L_t + alpha * I_t / temperature
+        # Logit-level fusion: frame_logit = L_t + alpha * tanh(I_t / temperature)
         if self.use_inconsistency_module and inconsistency_gated is not None:
             # Clamp to avoid exploding logits from extreme inconsistency values
             inconsistency_gated = torch.clamp(inconsistency_gated, -50.0, 50.0)
-            frame_logits = frame_logits_main + self.alpha * (inconsistency_gated / self.temperature)
+            alpha = torch.sigmoid(self.alpha)
+            scaled_inc = torch.tanh(inconsistency_gated / self.temperature)
+            frame_logits = frame_logits_main + alpha * scaled_inc
         else:
             frame_logits = frame_logits_main
         
@@ -898,27 +900,23 @@ def generate_hard_negatives(
     B, T, a_dim = audio.shape
     device = audio.device
     
-    if torch.rand(1).item() < swap_prob:
-        # Cross-video swap (shuffle batch)
-        indices = torch.randperm(B, device=device)
-        audio_neg = audio[indices]
-    else:
-        # Temporal shift
-        shifts = torch.randint(shift_range[0], shift_range[1] + 1, (B,), device=device)
-        audio_neg = torch.zeros_like(audio)
-        
-        for i in range(B):
-            shift = shifts[i].item()
-            # Circular shift
-            audio_neg[i] = torch.roll(audio[i], shifts=shift, dims=0)
-            
-            # Adjust mask if provided
-            if mask is not None:
-                # Don't shift padding
-                valid_length = (~mask[i]).sum().item()
-                if shift < valid_length:
-                    # Only shift valid part
-                    audio_neg[i, :valid_length] = torch.roll(audio[i, :valid_length], shifts=shift, dims=0)
+    # Only temporal shift (avoid cross-video swap)
+    shifts = torch.randint(shift_range[0], shift_range[1] + 1, (B,), device=device)
+    audio_neg = torch.zeros_like(audio)
+    
+    for i in range(B):
+        valid_length = T
+        if mask is not None:
+            valid_length = int((~mask[i]).sum().item())
+        if valid_length <= 1:
+            audio_neg[i] = audio[i]
+            continue
+        shift = int(shifts[i].item())
+        shift = min(shift, max(1, valid_length - 1))
+        # Shift only within valid region; keep padding untouched
+        audio_neg[i, :valid_length] = torch.roll(audio[i, :valid_length], shifts=shift, dims=0)
+        if valid_length < T:
+            audio_neg[i, valid_length:] = audio[i, valid_length:]
     
     return audio_neg
 
