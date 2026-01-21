@@ -118,7 +118,9 @@ def evaluate_dataset(
         video_ids = batch['video_ids']
         
         # Forward pass
-        frame_logits, video_logit = model(visual, audio, mask)
+        outputs = model(visual, audio, mask)
+        frame_logits = outputs['frame_logits']
+        video_logit = outputs.get('video_logit', None)
         frame_probs = torch.sigmoid(frame_logits.squeeze(-1))
         
         # Process each video in batch
@@ -136,8 +138,12 @@ def evaluate_dataset(
             all_frame_labels.append(vid_frame_labels)
             all_video_labels.append(vid_video_label)
             
-            # Video-level prediction (max pooling)
-            vid_video_prob = vid_frame_probs.max()
+            # Video-level prediction (prefer model head, else mean top-k)
+            if video_logit is not None:
+                vid_video_prob = torch.sigmoid(video_logit[i]).item()
+            else:
+                k = max(1, int(0.05 * valid_len))
+                vid_video_prob = float(np.mean(np.sort(vid_frame_probs)[-k:]))
             all_video_probs.append(vid_video_prob)
             
             # Binary predictions
@@ -145,7 +151,7 @@ def evaluate_dataset(
             
             # Extract segments
             pred_segments = extract_segments(vid_frame_preds, min_segment_length)
-            gt_segments = extract_segments(vid_frame_labels, min_segment_length)
+            gt_segments = extract_segments(vid_frame_labels, 1)
             
             # Compute IoU
             iou = compute_iou(pred_segments, gt_segments, valid_len)
@@ -283,6 +289,13 @@ def main():
     inferred_a_dim = int(state[a_key].shape[1])
     print(f"[INFO] Inferred dims from checkpoint: v_dim={inferred_v_dim}, a_dim={inferred_a_dim}")
     
+    def _has_key(key: str) -> bool:
+        return (key in state) or (f"module.{key}" in state)
+
+    use_inconsistency_module = _has_key('inconsistency_module.mlp.0.weight')
+    use_reliability_gating = _has_key('reliability_gating.gate_net.0.weight')
+    use_boundary_head = _has_key('start_classifier.weight') and _has_key('end_classifier.weight')
+
     # Create model
     model = FrameLocalizationModel(
         v_dim=inferred_v_dim,
@@ -292,11 +305,17 @@ def main():
         num_layers=model_args.get('num_layers', 4),
         dropout=model_args.get('dropout', 0.1),
         use_cross_attn=not model_args.get('no_cross_attn', False),
-        use_video_head=not model_args.get('no_video_head', False)
+        use_video_head=not model_args.get('no_video_head', False),
+        use_inconsistency_module=use_inconsistency_module,
+        use_reliability_gating=use_reliability_gating,
+        use_boundary_head=use_boundary_head,
+        temperature=model_args.get('temperature', 0.5)
     ).to(device)
     
     # Load weights
-    model.load_state_dict(checkpoint['model_state_dict'])
+    if any(k.startswith('module.') for k in state.keys()):
+        state = {k.replace('module.', '', 1): v for k, v in state.items()}
+    model.load_state_dict(state, strict=True)
     print(f"[INFO] Loaded model from epoch {checkpoint['epoch']}")
     
     # Load dataset
@@ -372,4 +391,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
